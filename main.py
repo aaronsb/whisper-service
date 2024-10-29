@@ -121,6 +121,12 @@ async def root():
                 <code>GET /health</code>
                 <p>Check the service status and supported formats.</p>
             </div>
+            
+            <div class="endpoint">
+                <h3>API Documentation</h3>
+                <code>GET /docs</code>
+                <p>Access the OpenAPI documentation for this service.</p>
+            </div>
         </body>
     </html>
     """

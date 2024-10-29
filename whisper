@@ -43,6 +43,9 @@ fi
 
 # Function to show usage (updated)
 show_usage() {
+    echo -e "${BOLD}Whisper Service Front End${NC}"
+    echo -e "  Sends transcription services to local Whsiper service on http://localhost:8000/transcribe"
+    echo -e "  Visit http://localhost:8000/ when the service is running to access the web interface"
     echo -e "${BOLD}Usage:${NC}"
     echo -e "  whisper [options] <file>"
     echo -e "  whisper [options] --audio <file>"
