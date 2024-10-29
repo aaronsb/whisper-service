@@ -176,19 +176,38 @@ async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile =
         # Process the file
         result = await process_large_file(temp_file_path)
         
-        if not result or not result.get("text"):
+        if not result or not isinstance(result, dict) or 'text' not in result:
             raise HTTPException(
                 status_code=500,
                 detail="Transcription produced no output"
             )
         
+        # Ensure segments are properly formatted
+        segments = []
+        if 'segments' in result:
+            for segment in result['segments']:
+                segments.append({
+                    'start': float(segment.get('start', 0)),
+                    'end': float(segment.get('end', 0)),
+                    'text': str(segment.get('text', '')).strip()
+                })
+        
+        # Create a clean response
+        response_data = {
+            'text': str(result['text']).strip(),
+            'segments': segments
+        }
+        
         # Schedule cleanup
         background_tasks.add_task(cleanup_file, temp_file_path)
         
-        return JSONResponse(content={
-            "text": result["text"],
-            "segments": result["segments"]
-        })
+        # Return JSON response
+        return JSONResponse(
+            content=response_data,
+            headers={
+                'Content-Type': 'application/json'
+            }
+        )
     
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}")

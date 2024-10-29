@@ -22,27 +22,8 @@ ICON_YOUTUBE="󰗃"
 ICON_CONVERT="󰁕"
 ICON_INFO="󰋼"
 
-# Global variables
-API_URL="http://localhost:8000"
-SUPPORTED_AUDIO_FORMATS=("mp3" "wav" "m4a" "ogg" "flac")
+# Debug mode
 DEBUG=false
-TIMEOUT=300  # 5 minutes timeout for large files
-
-# Function to show spinner while waiting
-spinner() {
-    local pid=$1
-    local message=$2
-    local delay=0.1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while kill -0 $pid 2>/dev/null; do
-        local temp=${spinstr#?}
-        printf " %s %s" "${spinstr}" "${YELLOW}${message}${NC}"
-        local spinstr=$temp${spinstr%"$temp"}
-        sleep $delay
-        printf "\r"
-    done
-    printf "\r"
-}
 
 # Function to log debug information
 debug_log() {
@@ -51,20 +32,15 @@ debug_log() {
     fi
 }
 
-# Function to check service health
+# Function to check if service is running
 check_service() {
     debug_log "Checking service health..."
     local health_response
-    health_response=$(curl -s "$API_URL/health" 2>/dev/null)
+    health_response=$(curl -s "http://localhost:8000/health")
     
     if [ $? -ne 0 ]; then
         echo -e "${RED}${ICON_ERROR} Error: Whisper service is not running${NC}"
         echo -e "${BLUE}${ICON_SERVER} Start the service with:${NC} docker compose up -d"
-        return 1
-    fi
-    
-    if ! echo "$health_response" | jq -e '.status == "healthy"' >/dev/null 2>&1; then
-        echo -e "${RED}${ICON_ERROR} Error: Service is not healthy${NC}"
         return 1
     fi
     
@@ -78,190 +54,105 @@ check_audio_format() {
     local ext="${file##*.}"
     ext="${ext,,}"  # Convert to lowercase
     
-    if [[ " ${SUPPORTED_AUDIO_FORMATS[@]} " =~ " ${ext} " ]]; then
+    local valid_extensions=("mp3" "wav" "m4a" "ogg" "flac")
+    if [[ " ${valid_extensions[*]} " =~ " ${ext} " ]]; then
         debug_log "File format '$ext' is supported"
         return 0
     else
         echo -e "${RED}${ICON_ERROR} Error: Unsupported audio format '$ext'${NC}"
-        echo -e "${BLUE}${ICON_INFO} Supported formats: ${SUPPORTED_AUDIO_FORMATS[*]}${NC}"
+        echo -e "Supported formats: ${valid_extensions[*]}"
         return 1
     fi
 }
 
-# Function to process video to audio
-process_video() {
-    local input="$1"
-    local output="${input%.*}.mp3"
-    echo -e "${BLUE}${ICON_CONVERT} Converting video to audio...${NC}"
-    debug_log "Input file: $input"
-    debug_log "Output file: $output"
-    
-    # Create temp directory if it doesn't exist
-    mkdir -p /tmp/whisper_cli
-    local temp_log="/tmp/whisper_cli/ffmpeg_$(date +%s).log"
-    
-    # Convert with progress monitoring
-    ffmpeg -i "$input" -vn -acodec libmp3lame -q:a 2 "$output" 2> "$temp_log" &
-    local ffmpeg_pid=$!
-    spinner $ffmpeg_pid "Converting..."
-    wait $ffmpeg_pid
-    
-    if [ $? -eq 0 ] && [ -f "$output" ] && [ -s "$output" ]; then
-        echo -e "${GREEN}${ICON_CHECK} Conversion complete${NC}"
-        debug_log "Conversion successful: $(ls -lh "$output")"
-        rm "$temp_log"
-        echo "$output"
-    else
-        echo -e "${RED}${ICON_ERROR} Conversion failed${NC}"
-        if [ -f "$temp_log" ]; then
-            echo -e "${RED}FFmpeg error:${NC}"
-            cat "$temp_log"
-            rm "$temp_log"
-        fi
-        exit 1
-    fi
-}
-
-# Function to download YouTube video
-download_youtube() {
-    local url="$1"
-    local temp_dir="/tmp/whisper_cli/youtube_$(date +%s)"
-    mkdir -p "$temp_dir"
-    
-    echo -e "${BLUE}${ICON_YOUTUBE} Downloading YouTube video...${NC}"
-    debug_log "YouTube URL: $url"
-    debug_log "Temp directory: $temp_dir"
-    
-    # Download video with progress output
-    yt-dlp -f 'bestaudio[ext=m4a]' -o "$temp_dir/%(title)s.%(ext)s" "$url" --no-warnings &
-    local ytdl_pid=$!
-    spinner $ytdl_pid "Downloading..."
-    wait $ytdl_pid
-    
-    if [ $? -ne 0 ]; then
-        echo -e "${RED}${ICON_ERROR} Download failed${NC}"
-        rm -rf "$temp_dir"
-        exit 1
-    fi
-    
-    # Get the downloaded file
-    local audio_file=$(find "$temp_dir" -type f -name "*.m4a" | head -1)
-    if [ -z "$audio_file" ]; then
-        echo -e "${RED}${ICON_ERROR} No audio file found after download${NC}"
-        rm -rf "$temp_dir"
-        exit 1
-    fi
-    
-    # Move to current directory
-    local final_name="$(basename "${audio_file%.*}").mp3"
-    debug_log "Converting to MP3: $final_name"
-    
-    ffmpeg -i "$audio_file" -c:a libmp3lame -q:a 2 "$final_name" 2>/dev/null &
-    local ffmpeg_pid=$!
-    spinner $ffmpeg_pid "Converting to MP3..."
-    wait $ffmpeg_pid
-    
-    # Cleanup and prompt for video retention
-    echo -e "\n${YELLOW}Press any key within 5 seconds to keep the original audio file...${NC}"
-    read -t 5 -n 1 -s
-    if [ $? -ne 0 ]; then
-        rm -rf "$temp_dir"
-        debug_log "Cleaned up temporary files"
-    else
-        mv "$audio_file" .
-        echo -e "${GREEN}Kept original audio file${NC}"
-        rm -rf "$temp_dir"
-    fi
-    
-    echo "$final_name"
+# Function to show spinner while waiting
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " %s %s" "${spinstr}" "${YELLOW}Processing...${NC}"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\r"
+    done
+    printf "\r"
 }
 
 # Function to send file to whisper service
 send_to_whisper() {
     local file="$1"
     debug_log "Sending file to whisper service: $file"
+
+    # Send request with curl
+    echo -e "${YELLOW}${ICON_LOADING} Sending file to Whisper service...${NC}"
     
-    # Check file exists and is readable
-    if [ ! -r "$file" ]; then
-        echo -e "${RED}${ICON_ERROR} Error: Cannot read file: $file${NC}"
-        return 1
-    fi
+    # Use a temporary file for the response
+    local temp_response
+    temp_response=$(mktemp)
     
-    # Send request with progress monitoring
-    local temp_response="/tmp/whisper_cli/response_$(date +%s).json"
+    # Send the request and capture the response
     curl -s -X POST \
          -F "file=@$file" \
-         --max-time $TIMEOUT \
-         "$API_URL/transcribe/" > "$temp_response" &
-    local curl_pid=$!
-    spinner $curl_pid "Processing audio..."
-    wait $curl_pid
+         --max-time 3600 \
+         "http://localhost:8000/transcribe/" > "$temp_response" &
     
-    if [ $? -ne 0 ]; then
+    local curl_pid=$!
+    spinner $curl_pid
+    wait $curl_pid
+    local curl_status=$?
+    
+    if [ $curl_status -ne 0 ]; then
         echo -e "${RED}${ICON_ERROR} Error: Failed to connect to service${NC}"
         rm -f "$temp_response"
         return 1
     fi
     
-    # Check for valid JSON response
-    if ! jq . "$temp_response" >/dev/null 2>&1; then
-        echo -e "${RED}${ICON_ERROR} Error: Invalid response from service${NC}"
-        debug_log "Raw response: $(cat "$temp_response")"
-        rm -f "$temp_response"
-        return 1
-    fi
-    
-    # Check for error in response
-    if jq -e 'has("detail")' "$temp_response" >/dev/null; then
-        echo -e "${RED}${ICON_ERROR} Server error: $(jq -r .detail "$temp_response")${NC}"
-        rm -f "$temp_response"
-        return 1
-    fi
-    
-    cat "$temp_response"
+    # Read and validate the response
+    local response
+    response=$(cat "$temp_response")
     rm -f "$temp_response"
+    
+    debug_log "Raw response: $response"
+    
+    # Check if response is empty
+    if [ -z "$response" ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Empty response from service${NC}"
+        return 1
+    fi
+    
+    # Try to parse as JSON and extract text
+    if ! echo "$response" | jq . >/dev/null 2>&1; then
+        echo -e "${RED}${ICON_ERROR} Error: Invalid JSON response${NC}"
+        debug_log "Response was: $response"
+        return 1
+    fi
+    
+    # Output the full response
+    echo "$response"
     return 0
 }
 
 # Function to show usage
 show_usage() {
     echo -e "${BOLD}Usage:${NC}"
-    echo -e "  whisper [options] <file|url>"
+    echo -e "  whisper [options] <file>"
     echo
     echo -e "${BOLD}Options:${NC}"
     echo -e "  -h, --help     Show this help message"
     echo -e "  -v, --verbose  Show detailed output including segments"
     echo -e "  --debug        Enable debug logging"
-    
-    if command -v ffmpeg >/dev/null 2>&1; then
-        echo -e "  --video       Process video files (mp4, mkv, avi, etc.)"
-    fi
-    
-    if command -v yt-dlp >/dev/null 2>&1; then
-        echo -e "  --youtube     Download and process YouTube video"
-    fi
-    
-    echo
-    echo -e "${BOLD}Supported Audio Formats:${NC}"
-    echo -e "  ${SUPPORTED_AUDIO_FORMATS[*]}"
     echo
     echo -e "${BOLD}Examples:${NC}"
     echo -e "  whisper audio.mp3"
     echo -e "  whisper --verbose recording.wav"
-    
-    if command -v ffmpeg >/dev/null 2>&1; then
-        echo -e "  whisper --video movie.mp4"
-    fi
-    
-    if command -v yt-dlp >/dev/null 2>&1; then
-        echo -e "  whisper --youtube https://youtube.com/watch?v=..."
-    fi
+    echo -e "  whisper --debug audio.mp3"
 }
 
 # Parse command line arguments
 VERBOSE=false
 FILE=""
-MODE="audio"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -277,78 +168,68 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift
             ;;
-        --video)
-            MODE="video"
-            shift
-            ;;
-        --youtube)
-            MODE="youtube"
-            shift
-            ;;
         *)
-            FILE="$1"
+            if [[ -f "$1" ]]; then
+                FILE="$1"
+            else
+                echo -e "${RED}${ICON_ERROR} Error: File '$1' not found${NC}"
+                exit 1
+            fi
             shift
             ;;
     esac
 done
 
-# Check if a file/url was provided
+# Check if a file was provided
 if [ -z "$FILE" ]; then
     show_usage
     exit 1
 fi
 
-# Create temp directory
-mkdir -p /tmp/whisper_cli
-
 # Main execution
 echo -e "\n${BLUE}${ICON_SOUND} Whisper Transcription${NC}"
+
+# Check if file exists and is readable
+if [ ! -r "$FILE" ]; then
+    echo -e "${RED}${ICON_ERROR} Error: Cannot read file: $FILE${NC}"
+    exit 1
+fi
 
 # Check service health
 check_service || exit 1
 
-# Process input based on mode
-case $MODE in
-    "video")
-        echo -e "${BLUE}${ICON_VIDEO} Video file:${NC} ${FILE}"
-        FILE=$(process_video "$FILE")
-        ;;
-    "youtube")
-        echo -e "${BLUE}${ICON_YOUTUBE} YouTube URL:${NC} ${FILE}"
-        FILE=$(download_youtube "$FILE")
-        ;;
-    "audio")
-        echo -e "${BLUE}${ICON_WAVE} Audio file:${NC} ${FILE}"
-        ;;
-esac
+# Display file info
+echo -e "${BLUE}${ICON_WAVE} Audio file:${NC} ${FILE}"
 
-# Verify audio format
+# Check audio format
 check_audio_format "$FILE" || exit 1
 
-# Send to whisper
+# Send to whisper and capture response
 response=$(send_to_whisper "$FILE")
-if [ $? -eq 0 ]; then
+exit_code=$?
+
+if [ $exit_code -eq 0 ]; then
     echo -e "${GREEN}${ICON_CHECK} Transcription complete!${NC}\n"
     
     # Extract and display the text
-    text=$(echo "$response" | jq -r '.text')
-    echo -e "${BOLD}Transcription:${NC}"
-    echo -e "$text\n"
-    
-    if $VERBOSE; then
-        echo -e "${BOLD}Segments:${NC}"
-        echo "$response" | jq -r '.segments[] | "\(.start)s -> \(.end)s: \(.text)"'
-        echo
+    text=$(echo "$response" | jq -r '.text // empty')
+    if [ -n "$text" ]; then
+        echo -e "${BOLD}Transcription:${NC}"
+        echo -e "$text\n"
+        
+        if [ "$VERBOSE" = true ]; then
+            echo -e "${BOLD}Segments:${NC}"
+            echo "$response" | jq -r '.segments[] | "\(.start)s -> \(.end)s: \(.text)"' 2>/dev/null
+            echo
+        fi
+    else
+        echo -e "${RED}${ICON_ERROR} Error: No transcription text in response${NC}"
+        debug_log "Response was: $response"
+        exit 1
     fi
+else
+    echo -e "${RED}${ICON_ERROR} Failed to get transcription${NC}"
+    exit 1
 fi
-
-# Cleanup if it was a YouTube download
-if [ "$MODE" = "youtube" ]; then
-    debug_log "Cleaning up downloaded file: $FILE"
-    rm -f "$FILE"
-fi
-
-# Clean up temp directory if empty
-rmdir /tmp/whisper_cli 2>/dev/null
 
 exit 0
