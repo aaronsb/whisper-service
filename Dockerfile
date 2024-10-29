@@ -20,5 +20,8 @@ RUN mkdir -p /app/uploads
 # Copy the API service code
 COPY main.py .
 
-# Run the service
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Make upload directory writable
+RUN chmod 777 /app/uploads
+
+# Run the service with uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
