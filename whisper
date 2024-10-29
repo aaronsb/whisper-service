@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+
+# Colors and styling
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
+
+# Nerd Font icons
+ICON_MIC="󰍬"
+ICON_WAVE="󰝚"
+ICON_CHECK="󰄬"
+ICON_ERROR="󰅚"
+ICON_LOADING="󰔟"
+ICON_SERVER="󰒋"
+ICON_SOUND="󰓃"
+ICON_VIDEO="󰕧"
+ICON_YOUTUBE="󰗃"
+ICON_CONVERT="󰁕"
+
+# Function to check dependencies
+check_dependency() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo -e "${RED}${ICON_ERROR} Error: $1 is not installed${NC}"
+        return 1
+    fi
+    return 0
+}
+
+# Function to show spinner while waiting
+spinner() {
+    local pid=$1
+    local delay=0.1
+    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
+        local temp=${spinstr#?}
+        printf " %s %s" "${spinstr}" "${YELLOW}Processing...${NC}"
+        local spinstr=$temp${spinstr%"$temp"}
+        sleep $delay
+        printf "\r"
+    done
+    printf "\r"
+}
+
+# Function to check if service is running
+check_service() {
+    if ! curl -s "http://localhost:8000/health" > /dev/null; then
+        echo -e "${RED}${ICON_ERROR} Error: Whisper service is not running${NC}"
+        echo -e "${BLUE}${ICON_SERVER} Start the service with:${NC} docker compose up -d"
+        exit 1
+    fi
+}
+
+# Function to show usage
+show_usage() {
+    echo -e "${BOLD}Usage:${NC}"
+    echo -e "  whisper [options] <file|url>"
+    echo
+    echo -e "${BOLD}Options:${NC}"
+    echo -e "  -h, --help     Show this help message"
+    echo -e "  -v, --verbose  Show detailed output including segments"
+    
+    if check_dependency "ffmpeg" >/dev/null; then
+        echo -e "  --video       Process video files (mp4, mkv, avi, etc.)"
+    fi
+    
+    if check_dependency "yt-dlp" >/dev/null && check_dependency "ffmpeg" >/dev/null; then
+        echo -e "  --youtube     Download and process YouTube video"
+    fi
+    
+    echo
+    echo -e "${BOLD}Examples:${NC}"
+    echo -e "  whisper audio.mp3"
+    echo -e "  whisper --verbose recording.wav"
+    
+    if check_dependency "ffmpeg" >/dev/null; then
+        echo -e "  whisper --video movie.mp4"
+    fi
+    
+    if check_dependency "yt-dlp" >/dev/null && check_dependency "ffmpeg" >/dev/null; then
+        echo -e "  whisper --youtube https://youtube.com/watch?v=..."
+    fi
+}
+
+# Function to process video to audio
+process_video() {
+    local input="$1"
+    local output="${input%.*}.mp3"
+    echo -e "${BLUE}${ICON_CONVERT} Converting video to audio...${NC}"
+    ffmpeg -i "$input" -q:a 0 -map a "$output" -loglevel error
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}${ICON_CHECK} Conversion complete${NC}"
+        echo "$output"
+    else
+        echo -e "${RED}${ICON_ERROR} Conversion failed${NC}"
+        exit 1
+    fi
+}
+
+# Function to download YouTube video
+download_youtube() {
+    local url="$1"
+    local temp_dir=$(mktemp -d)
+    echo -e "${BLUE}${ICON_YOUTUBE} Downloading YouTube video...${NC}"
+    
+    # Download video
+    local video_file=$(yt-dlp -o "$temp_dir/%(title)s.%(ext)s" --get-filename "$url")
+    yt-dlp -o "$temp_dir/%(title)s.%(ext)s" "$url" --no-progress
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}${ICON_ERROR} Download failed${NC}"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    # Convert to audio
+    local audio_file="${video_file%.*}.mp3"
+    echo -e "${BLUE}${ICON_CONVERT} Extracting audio...${NC}"
+    ffmpeg -i "$video_file" -q:a 0 -map a "$audio_file" -loglevel error
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}${ICON_ERROR} Audio extraction failed${NC}"
+        rm -rf "$temp_dir"
+        exit 1
+    fi
+    
+    # Prompt to keep video
+    echo -e "\n${YELLOW}Press any key within 5 seconds to keep the video file...${NC}"
+    read -t 5 -n 1 -s
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}Keeping video file${NC}"
+        mv "$video_file" .
+    else
+        echo -e "${BLUE}Removing video file${NC}"
+        rm "$video_file"
+    fi
+    
+    # Move audio file to current directory
+    mv "$audio_file" .
+    rm -rf "$temp_dir"
+    echo "$audio_file"
+}
+
+# Parse command line arguments
+VERBOSE=false
+FILE=""
+MODE="audio"
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        -h|--help)
+            show_usage
+            exit 0
+            ;;
+        -v|--verbose)
+            VERBOSE=true
+            shift
+            ;;
+        --video)
+            if ! check_dependency "ffmpeg"; then
+                exit 1
+            fi
+            MODE="video"
+            shift
+            ;;
+        --youtube)
+            if ! check_dependency "yt-dlp" || ! check_dependency "ffmpeg"; then
+                exit 1
+            fi
+            MODE="youtube"
+            shift
+            ;;
+        *)
+            FILE="$1"
+            shift
+            ;;
+    esac
+done
+
+if [[ -z "$FILE" ]]; then
+    show_usage
+    exit 1
+fi
+
+# Main script
+echo -e "\n${BLUE}${ICON_SOUND} Whisper Transcription${NC}"
+
+# Process input based on mode
+case $MODE in
+    "video")
+        if [[ ! -f "$FILE" ]]; then
+            echo -e "${RED}${ICON_ERROR} Error: File '$FILE' not found${NC}"
+            exit 1
+        fi
+        echo -e "${BLUE}${ICON_VIDEO} Video file:${NC} ${FILE}"
+        FILE=$(process_video "$FILE")
+        ;;
+    "youtube")
+        echo -e "${BLUE}${ICON_YOUTUBE} YouTube URL:${NC} ${FILE}"
+        FILE=$(download_youtube "$FILE")
+        ;;
+    "audio")
+        if [[ ! -f "$FILE" ]]; then
+            echo -e "${RED}${ICON_ERROR} Error: File '$FILE' not found${NC}"
+            exit 1
+        fi
+        echo -e "${BLUE}${ICON_WAVE} Audio file:${NC} ${FILE}"
+        ;;
+esac
+
+# Check if service is running
+check_service
+
+# Send request to transcribe
+echo -e "${YELLOW}${ICON_MIC} Sending file to Whisper service...${NC}"
+
+# Make the request and capture output
+response=$(curl -s -X POST -F "file=@$FILE" http://localhost:8000/transcribe/) &
+spinner $!
+
+# Check if the request was successful
+if [ $? -eq 0 ] && [ -n "$response" ]; then
+    echo -e "${GREEN}${ICON_CHECK} Transcription complete!${NC}\n"
+    
+    # Extract and display the text
+    text=$(echo $response | jq -r '.text')
+    echo -e "${BOLD}Transcription:${NC}"
+    echo -e "$text\n"
+    
+    # If verbose mode is enabled, show segments
+    if $VERBOSE; then
+        echo -e "${BOLD}Segments:${NC}"
+        echo $response | jq -r '.segments[] | "\(.start) -> \(.end): \(.text)"'
+        echo
+    fi
+else
+    echo -e "${RED}${ICON_ERROR} Error: Failed to transcribe audio${NC}"
+    exit 1
+fi
+
+# Clean up temporary audio file if it was from YouTube
+if [ "$MODE" = "youtube" ]; then
+    rm -f "$FILE"
+fi
