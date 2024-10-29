@@ -27,21 +27,25 @@ ICON_SAVE="󰆓"
 DEBUG=false
 VERBOSE=false
 FILE=""
+MODE="audio"  # Default mode
 
-# Function to show usage
+# Function to show usage (updated)
 show_usage() {
     echo -e "${BOLD}Usage:${NC}"
     echo -e "  whisper [options] <file>"
+    echo -e "  whisper [options] --audio <file>"
     echo
     echo -e "${BOLD}Options:${NC}"
     echo -e "  -h, --help     Show this help message"
     echo -e "  -v, --verbose  Show detailed output including segments"
     echo -e "  --debug        Enable debug logging"
+    echo -e "  --audio        Explicitly specify audio file input"
     echo
     echo -e "${BOLD}Examples:${NC}"
     echo -e "  whisper audio.mp3"
+    echo -e "  whisper --audio audio.mp3"
     echo -e "  whisper --verbose recording.wav"
-    echo -e "  whisper --debug audio.mp3"
+    echo -e "  whisper --debug --audio recording.mp3"
 }
 
 # Function to log debug information
@@ -84,7 +88,7 @@ check_audio_format() {
     fi
 }
 
-# Function to show spinner while waiting
+# Function to show spinner while waiting for processing
 spinner() {
     local pid=$1
     local message="${2:-Processing...}"
@@ -92,12 +96,12 @@ spinner() {
     local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
     while [ "$(ps a | awk '{print $1}' | grep $pid)" ]; do
         local temp=${spinstr#?}
-        printf " %s %s" "${spinstr}" "${YELLOW}${message}${NC}"
+        printf " %s %s" "${spinstr}" "${message}"  # Removed ANSI codes here
         local spinstr=$temp${spinstr%"$temp"}
         sleep $delay
         printf "\r"
     done
-    printf "\r"
+    printf "\r%*s\r" "$(tput cols)" ""  # Clear the entire line
 }
 
 # Function to save JSON response
@@ -112,10 +116,10 @@ save_json_response() {
     echo "$response" | jq '.' > "$output_file"
     
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}${ICON_SAVE} Saved transcript to:${NC} $output_file"
+        printf "${GREEN}${ICON_SAVE} Saved transcript to:${NC} %s\n" "$output_file"
         return 0
     else
-        echo -e "${RED}${ICON_ERROR} Failed to save transcript${NC}"
+        printf "${RED}${ICON_ERROR} Failed to save transcript${NC}\n"
         return 1
     fi
 }
@@ -141,7 +145,7 @@ send_to_whisper() {
     local file="$1"
     debug_log "Sending file to whisper service: $file"
     
-    echo -e "${YELLOW}${ICON_LOADING} Sending file to Whisper service...${NC}"
+    printf "${YELLOW}${ICON_LOADING} Sending file to Whisper service...${NC}\n"
     
     # Use a temporary file for the response
     local temp_response
@@ -221,10 +225,22 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift
             ;;
+        --audio)
+            MODE="audio"
+            shift
+            if [ -n "$2" ] && [ -f "$2" ]; then
+                FILE="$2"
+                shift
+            else
+                echo -e "${RED}${ICON_ERROR} Error: Missing or invalid file after --audio${NC}"
+                exit 1
+            fi
+            ;;
         *)
             if [ -z "$FILE" ]; then
                 if [ -f "$1" ]; then
                     FILE="$1"
+                    MODE="audio"
                 else
                     echo -e "${RED}${ICON_ERROR} Error: File not found: $1${NC}"
                     exit 1
