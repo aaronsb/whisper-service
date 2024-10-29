@@ -22,28 +22,75 @@ ICON_YOUTUBE="󰗃"
 ICON_CONVERT="󰁕"
 ICON_INFO="󰋼"
 ICON_SAVE="󰆓"
+ICON_DOWNLOAD="󰑟"
 
 # Initialize variables
 DEBUG=false
 VERBOSE=false
+JSONOUT=false
+KEEP=false
 FILE=""
+YOUTUBE_URL=""
 MODE="audio"  # Default mode
+
+# Arrays
+declare -a PROCESSED_FILES
+
+# Check if ffmpeg is available
+if command -v ffmpeg >/dev/null 2>&1; then
+    FFMPEG_AVAILABLE=true
+else
+    FFMPEG_AVAILABLE=false
+fi
+
+# Check if yt-dlp is available
+if command -v yt-dlp >/dev/null 2>&1; then
+    YTDLP_AVAILABLE=true
+else
+    YTDLP_AVAILABLE=false
+fi
 
 # Function to show usage (updated)
 show_usage() {
     echo -e "${BOLD}Usage:${NC}"
     echo -e "  whisper [options] <file>"
     echo -e "  whisper [options] --audio <file>"
+    if [ "$FFMPEG_AVAILABLE" = true ]; then
+        echo -e "  whisper [options] --video <video_file>"
+    fi
+    if [ "$FFMPEG_AVAILABLE" = true ] && [ "$YTDLP_AVAILABLE" = true ]; then
+        echo -e "  whisper [options] --youtube <url>"
+    fi
     echo
     echo -e "${BOLD}Options:${NC}"
-    echo -e "  -h, --help     Show this help message"
-    echo -e "  -v, --verbose  Show detailed output including segments"
-    echo -e "  --debug        Enable debug logging"
-    echo -e "  --audio        Explicitly specify audio file input"
+    echo -e "  -h, --help       Show this help message"
+    echo -e "  -v, --verbose    Show detailed output including transcription and segments"
+    echo -e "  --debug          Enable debug logging"
+    echo -e "  --audio          Explicitly specify audio file input"
+    if [ "$FFMPEG_AVAILABLE" = true ]; then
+        echo -e "  --video          Specify video file input (mp4, mov, mkv, avi, webm, ts)"
+    else
+        echo -e "  ${YELLOW}Note:${NC} Install ffmpeg to enable video processing (--video option)"
+    fi
+    if [ "$FFMPEG_AVAILABLE" = true ] && [ "$YTDLP_AVAILABLE" = true ]; then
+        echo -e "  --youtube        Specify YouTube URL to download and transcribe"
+    else
+        if [ "$YTDLP_AVAILABLE" = false ]; then
+            echo -e "  ${YELLOW}Note:${NC} Install yt-dlp to enable YouTube processing (--youtube option)"
+        fi
+    fi
+    echo -e "  --keep           Keep all processed media files and not delete them"
+    echo -e "  --jsonout        Output only the JSON transcription payload to stdout"
     echo
     echo -e "${BOLD}Examples:${NC}"
     echo -e "  whisper audio.mp3"
     echo -e "  whisper --audio audio.mp3"
+    if [ "$FFMPEG_AVAILABLE" = true ]; then
+        echo -e "  whisper --video video.mp4"
+    fi
+    if [ "$FFMPEG_AVAILABLE" = true ] && [ "$YTDLP_AVAILABLE" = true ]; then
+        echo -e "  whisper --youtube https://www.youtube.com/watch?v=video_id"
+    fi
     echo -e "  whisper --verbose recording.wav"
     echo -e "  whisper --debug --audio recording.mp3"
 }
@@ -116,10 +163,14 @@ save_json_response() {
     echo "$response" | jq '.' > "$output_file"
     
     if [ $? -eq 0 ]; then
-        printf "${GREEN}${ICON_SAVE} Saved transcript to:${NC} %s\n" "$output_file"
+        if [ "$JSONOUT" = false ]; then
+            printf "${GREEN}${ICON_SAVE} Saved transcript to:${NC} %s\n" "$output_file"
+        fi
         return 0
     else
-        printf "${RED}${ICON_ERROR} Failed to save transcript${NC}\n"
+        if [ "$JSONOUT" = false ]; then
+            printf "${RED}${ICON_ERROR} Failed to save transcript${NC}\n"
+        fi
         return 1
     fi
 }
@@ -136,7 +187,14 @@ process_json_response() {
         return 1
     fi
     
-    echo "$text"
+    if [ "$VERBOSE" = true ]; then
+        echo -e "\n${BOLD}Transcription:${NC}"
+        echo -e "$text\n"
+        
+        echo -e "${BOLD}Segments:${NC}"
+        echo "$response" | jq -r '.segments[] | "\(.start)s -> \(.end)s: \(.text)"' 2>/dev/null
+        echo
+    fi
     return 0
 }
 
@@ -145,7 +203,9 @@ send_to_whisper() {
     local file="$1"
     debug_log "Sending file to whisper service: $file"
     
-    printf "${YELLOW}${ICON_LOADING} Sending file to Whisper service...${NC}\n"
+    if [ "$JSONOUT" = false ]; then
+        printf "${YELLOW}${ICON_LOADING} Sending file to Whisper service...${NC}\n"
+    fi
     
     # Use a temporary file for the response
     local temp_response
@@ -158,7 +218,9 @@ send_to_whisper() {
          "http://localhost:8000/transcribe/" > "$temp_response" &
     
     local curl_pid=$!
-    spinner $curl_pid "Transcribing..."
+    if [ "$JSONOUT" = false ]; then
+        spinner $curl_pid "Transcribing..."
+    fi
     wait $curl_pid
     local curl_status=$?
     
@@ -191,23 +253,15 @@ send_to_whisper() {
     # Save JSON response
     save_json_response "$response" "$file"
     
-    # Process and display transcription
-    local text
-    text=$(process_json_response "$response")
-    if [ $? -eq 0 ]; then
-        echo -e "\n${BOLD}Transcription:${NC}"
-        echo -e "$text\n"
-        
-        if [ "$VERBOSE" = true ]; then
-            echo -e "${BOLD}Segments:${NC}"
-            echo "$response" | jq -r '.segments[] | "\(.start)s -> \(.end)s: \(.text)"' 2>/dev/null
-            echo
-        fi
+    # Output JSON response if JSONOUT is true
+    if [ "$JSONOUT" = true ]; then
+        echo "$response"
         return 0
-    else
-        echo -e "${RED}${ICON_ERROR} Error: Could not process transcription${NC}"
-        return 1
     fi
+    
+    # Process and display transcription
+    process_json_response "$response"
+    return $?
 }
 
 # Parse command line arguments
@@ -225,14 +279,56 @@ while [[ $# -gt 0 ]]; do
             DEBUG=true
             shift
             ;;
+        --jsonout)
+            JSONOUT=true
+            shift
+            ;;
+        --keep)
+            KEEP=true
+            shift
+            ;;
         --audio)
             MODE="audio"
             shift
-            if [ -n "$2" ] && [ -f "$2" ]; then
-                FILE="$2"
+            if [ -n "$1" ] && [ -f "$1" ]; then
+                FILE="$1"
                 shift
             else
                 echo -e "${RED}${ICON_ERROR} Error: Missing or invalid file after --audio${NC}"
+                exit 1
+            fi
+            ;;
+        --video)
+            if [ "$FFMPEG_AVAILABLE" = false ]; then
+                echo -e "${RED}${ICON_ERROR} Error: ffmpeg is not available. Install ffmpeg to use --video option.${NC}"
+                exit 1
+            fi
+            MODE="video"
+            shift
+            if [ -n "$1" ] && [ -f "$1" ]; then
+                FILE="$1"
+                shift
+            else
+                echo -e "${RED}${ICON_ERROR} Error: Missing or invalid file after --video${NC}"
+                exit 1
+            fi
+            ;;
+        --youtube)
+            if [ "$FFMPEG_AVAILABLE" = false ]; then
+                echo -e "${RED}${ICON_ERROR} Error: ffmpeg is not available. Install ffmpeg to use --youtube option.${NC}"
+                exit 1
+            fi
+            if [ "$YTDLP_AVAILABLE" = false ]; then
+                echo -e "${RED}${ICON_ERROR} Error: yt-dlp is not available. Install yt-dlp to use --youtube option.${NC}"
+                exit 1
+            fi
+            MODE="youtube"
+            shift
+            if [ -n "$1" ]; then
+                YOUTUBE_URL="$1"
+                shift
+            else
+                echo -e "${RED}${ICON_ERROR} Error: Missing URL after --youtube${NC}"
                 exit 1
             fi
             ;;
@@ -255,33 +351,99 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Check if a file was provided
-if [ -z "$FILE" ]; then
+# Check if a file or URL was provided
+if [ -z "$FILE" ] && [ "$MODE" != "youtube" ]; then
     show_usage
     exit 1
 fi
 
 # Main execution
-echo -e "\n${BLUE}${ICON_SOUND} Whisper Transcription${NC}"
+if [ "$JSONOUT" = false ]; then
+    echo -e "\n${BLUE}${ICON_SOUND} Whisper Transcription${NC}"
+fi
 
-# Check if file exists and is readable
-if [ ! -r "$FILE" ]; then
-    echo -e "${RED}${ICON_ERROR} Error: Cannot read file: $FILE${NC}"
-    exit 1
+# Handle different modes
+if [ "$MODE" = "audio" ]; then
+    # Check if file exists and is readable
+    if [ ! -r "$FILE" ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Cannot read file: $FILE${NC}"
+        exit 1
+    fi
+    # Check audio format
+    check_audio_format "$FILE" || exit 1
+elif [ "$MODE" = "video" ]; then
+    # Check if file exists and is readable
+    if [ ! -r "$FILE" ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Cannot read file: $FILE${NC}"
+        exit 1
+    fi
+    # Extract audio from video
+    AUDIO_FILE="${FILE%.*}.mp3"
+    if [ "$JSONOUT" = false ]; then
+        echo -e "${YELLOW}${ICON_CONVERT} Extracting audio from video...${NC}"
+    fi
+    ffmpeg -i "$FILE" -q:a 0 -map a "$AUDIO_FILE" -y >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Failed to extract audio from video${NC}"
+        exit 1
+    fi
+    FILE="$AUDIO_FILE"
+    PROCESSED_FILES+=("$AUDIO_FILE")
+    # Check audio format
+    check_audio_format "$FILE" || exit 1
+elif [ "$MODE" = "youtube" ]; then
+    # Download video using yt-dlp
+    if [ "$JSONOUT" = false ]; then
+        echo -e "${YELLOW}${ICON_DOWNLOAD} Downloading video from YouTube...${NC}"
+    fi
+    TEMP_DIR=$(mktemp -d)
+    VIDEO_FILE="$TEMP_DIR/video.mp4"
+    yt-dlp -f bestvideo+bestaudio --merge-output-format mp4 "$YOUTUBE_URL" -o "$VIDEO_FILE" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Failed to download video${NC}"
+        exit 1
+    fi
+    PROCESSED_FILES+=("$VIDEO_FILE")
+    # Extract audio from downloaded video
+    AUDIO_FILE="${VIDEO_FILE%.*}.mp3"
+    if [ "$JSONOUT" = false ]; then
+        echo -e "${YELLOW}${ICON_CONVERT} Extracting audio from video...${NC}"
+    fi
+    ffmpeg -i "$VIDEO_FILE" -q:a 0 -map a "$AUDIO_FILE" -y >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}${ICON_ERROR} Error: Failed to extract audio from video${NC}"
+        exit 1
+    fi
+    FILE="$AUDIO_FILE"
+    PROCESSED_FILES+=("$AUDIO_FILE")
+    # Check audio format
+    check_audio_format "$FILE" || exit 1
 fi
 
 # Check service health
 check_service || exit 1
 
 # Display file info
-echo -e "${BLUE}${ICON_WAVE} Audio file:${NC} ${FILE}"
-
-# Check audio format
-check_audio_format "$FILE" || exit 1
+if [ "$JSONOUT" = false ]; then
+    echo -e "${BLUE}${ICON_WAVE} Audio file:${NC} ${FILE}"
+fi
 
 # Send to whisper and process response
 if send_to_whisper "$FILE"; then
-    echo -e "${GREEN}${ICON_CHECK} Transcription complete!${NC}"
+    if [ "$JSONOUT" = false ]; then
+        echo -e "${GREEN}${ICON_CHECK} Transcription complete!${NC}"
+    fi
+    # Delete processed files unless KEEP is true
+    if [ "$KEEP" = false ]; then
+        for f in "${PROCESSED_FILES[@]}"; do
+            rm -f "$f"
+        done
+    fi
+    # List files that were retained after processing
+    if [ "$JSONOUT" = false ]; then
+        echo -e "\n${BOLD}Files retained after processing:${NC}"
+        ls -lh "$FILE"
+    fi
     exit 0
 else
     exit 1
