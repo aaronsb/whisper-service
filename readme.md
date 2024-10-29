@@ -1,168 +1,197 @@
-# 📄 Whisper Transcription Service Documentation
+# 🎙️ Whisper Transcription Service
 
-Welcome to the Whisper Transcription Service! This documentation will guide you through the setup and usage of the Whisper Transcription API, which is designed to transcribe audio files using OpenAI's Whisper model. This service is optimized for handling large audio files with no size limit.
+A Docker-powered service that transcribes audio files using OpenAI's Whisper model. This service is optimized for handling audio files of any size and runs locally on your machine using GPU acceleration (if available).
 
-## 🚀 Getting Started
+## ✨ Features
+
+- 🚀 Easy setup with Docker
+- 📦 No file size limits
+- 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .ogg, .flac)
+- ⚡ GPU acceleration (if NVIDIA GPU is available)
+- 🔒 Secure file handling with automatic cleanup
+- 🌐 Simple REST API interface
+- 📝 Convenient command-line client
+
+## 🚀 Quick Start
 
 ### Prerequisites
 
-Before you begin, ensure you have the following installed:
+You'll need:
+- Docker and Docker Compose installed on your machine
+- NVIDIA GPU with CUDA support (optional, but recommended for better performance)
+- NVIDIA Container Toolkit (if using GPU)
 
-- Docker
-- Docker Compose
-- NVIDIA GPU with CUDA support (for GPU acceleration)
+### Installation
 
-### 📦 Installation
-
-1. **Clone the Repository**
-
-    ```sh
-    git clone https://github.com/your-repo/whisper-service.git
-    cd whisper-service
-    ```
-
-2. **Build and Start the Service**
-
-    ```sh
-    docker-compose up --build
-    ```
-
-    This command will build the Docker image and start the service. The API will be available at `http://localhost:8000`.
-
-### 🐳 Docker Configuration
-
-#### `Dockerfile`
-
-The `Dockerfile` sets up the environment for the Whisper Transcription API. Key steps include:
-
-- Using the `nvidia/cuda:12.1.0-base-ubuntu22.04` base image.
-- Installing system dependencies like Python and FFmpeg.
-- Installing Python dependencies including `torch`, `whisper`, and `fastapi`.
-- Setting environment variables for better performance.
-- Running the service as a non-root user for better security.
-
-#### `docker-compose.yml`
-
-The `docker-compose.yml` file configures the Docker service. Key configurations include:
-
-- Mapping port `8000` to the host.
-- Mounting the `uploads` directory for file storage.
-- Setting environment variables for NVIDIA GPU support.
-- Increasing shared memory size and setting `ulimits` for better performance.
-- Ensuring the service restarts unless stopped manually.
-
-### 📂 Directory Structure
-
-```plaintext
-whisper-service/
-├── Dockerfile
-├── docker-compose.yml
-├── main.py
-├── process_audio.py
-├── setup.sh
-└── documentation.md
+1. Clone this repository:
+```bash
+git clone https://github.com/your-repo/whisper-service
+cd whisper-service
 ```
 
-## 🛠️ API Endpoints
+2. Start the service:
+```bash
+docker compose up --build
+```
 
-### Root Endpoint
+3. Install the command-line client:
+```bash
+# Option 1: Run the installer directly
+bash setup.sh
 
-- **URL:** `/`
-- **Method:** `GET`
-- **Response:** HTML page with information about the available endpoints.
+# Option 2: Make the installer executable and run it
+chmod +x setup.sh
+./setup.sh
+```
 
-### Health Check
+## 🎯 Using the Service
 
-- **URL:** `/health`
-- **Method:** `GET`
-- **Response:** JSON object with the health status of the service.
+### Command Line Client
 
-    ```json
-    {
-        "status": "healthy",
-        "model": "whisper-base",
-        "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
-        "max_file_size": "unlimited",
-        "gpu_available": true
-    }
-    ```
+The `whisper` command-line client is the easiest way to transcribe audio files. After running `setup.sh`, you can use it from anywhere on your system.
 
-### Transcribe Audio
+Basic usage:
+```bash
+whisper path/to/your/audio.mp3
+```
 
-- **URL:** `/transcribe/`
-- **Method:** `POST`
-- **Description:** Submit any size audio file for transcription.
-- **Request:** Multipart form data with the audio file.
-- **Response:** JSON object with the transcription result.
+Examples:
+```bash
+# Transcribe a podcast episode
+whisper ~/Downloads/podcast-episode-123.mp3
 
-### Error Handlers
+# Transcribe a voice memo
+whisper ~/Voice\ Memos/meeting-notes.m4a
 
-- **404 Not Found:** Custom handler for unknown endpoints.
-- **500 Internal Server Error:** Custom handler for server errors.
+# Transcribe an interview
+whisper ~/Recordings/interview-2024.wav
 
-## 📝 Usage Instructions
+# Process multiple files using shell expansion
+whisper ~/Podcasts/*.mp3
+```
 
-### Transcribing an Audio File
+The transcription will be saved in JSON format in the same directory as the input file, with `_transcript.json` appended to the original filename. For example:
+- Input: `meeting-notes.m4a`
+- Output: `meeting-notes_transcript.json`
 
-1. **Upload the Audio File**
+### Via Web Browser
 
-    Use the `/transcribe/` endpoint to upload your audio file. You can use tools like `curl` or Postman for this purpose.
+1. Open `http://localhost:8000` in your browser
+2. You'll see a simple interface with available endpoints
+3. Visit `http://localhost:8000/docs` for interactive API documentation
 
-    ```sh
-    curl -X POST "http://localhost:8000/transcribe/" -F "file=@/path/to/your/audiofile.mp3"
-    ```
+### Via REST API
 
-2. **Receive the Transcription**
+If you need programmatic access to the service, you can use the REST API directly:
 
-    The response will contain the transcription result in JSON format.
+Transcribe an audio file using curl:
+```bash
+curl -X POST "http://localhost:8000/transcribe/" \
+     -F "file=@path/to/your/audio.mp3"
+```
 
-### Health Check
-
-Check the health status of the service by accessing the `/health` endpoint.
-
-```sh
+Check if the service is running:
+```bash
 curl "http://localhost:8000/health"
 ```
 
-## 🛡️ Security
+### Example Response
 
-- The service runs as a non-root user inside the Docker container.
-- CORS middleware is configured to allow requests from any origin.
-
-## 🧹 Cleanup
-
-Temporary files are cleaned up after processing to ensure efficient memory usage. Garbage collection is forced before and after processing large files.
-
-## 🛠️ Development
-
-### Setting Up the Development Environment
-
-1. **Install Dependencies**
-
-    ```sh
-    pip install -r requirements.txt
-    ```
-
-2. **Run the Service Locally**
-
-    ```sh
-    uvicorn main:app --reload
-    ```
-
-### Running Tests
-
-To run tests, use the following command:
-
-```sh
-pytest
+```json
+{
+  "text": "This is the transcribed text from your audio file.",
+  "segments": [
+    {
+      "start": 0.0,
+      "end": 2.5,
+      "text": "This is the"
+    },
+    {
+      "start": 2.5,
+      "end": 4.8,
+      "text": "transcribed text"
+    },
+    {
+      "start": 4.8,
+      "end": 6.2,
+      "text": "from your audio file."
+    }
+  ]
+}
 ```
 
-## 📜 License
+## 🔧 Configuration
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+### GPU Support
 
-## 📞 Contact
+The service automatically detects and uses your NVIDIA GPU if available. To disable GPU support, modify `docker-compose.yml` by removing these sections:
+```yaml
+environment:
+  - NVIDIA_VISIBLE_DEVICES=all
+  - NVIDIA_DRIVER_CAPABILITIES=all
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+```
 
-For any questions or support, please open an issue on the [GitHub repository](https://github.com/your-repo/whisper-service/issues).
+### Performance Tuning
 
-Thank you for using the Whisper Transcription Service! We hope this documentation helps you get started quickly and easily. Happy transcribing! 🎉
+The service is configured with sensible defaults, but you can adjust these in `docker-compose.yml`:
+- `shm_size`: Shared memory size (default: 8GB)
+- `workers`: Number of worker processes (default: 1)
+- `timeout-keep-alive`: Keep-alive timeout (default: 300 seconds)
+
+## 🚨 Common Issues & Solutions
+
+1. **"Error: GPU not available"**
+   - Check that your NVIDIA drivers are installed
+   - Verify NVIDIA Container Toolkit is installed
+   - Try running `nvidia-smi` to confirm GPU is detected
+
+2. **"Error: Permission denied"**
+   - Ensure the `uploads` directory has proper permissions:
+     ```bash
+     chmod 777 uploads
+     ```
+
+3. **Service seems slow**
+   - If using CPU only, consider installing GPU support
+   - Try reducing the number of concurrent requests
+   - Check system resource usage with `docker stats`
+
+## 🔍 Understanding the Components
+
+- `main.py`: The FastAPI application that handles HTTP requests
+- `process_audio.py`: Core logic for audio transcription
+- `Dockerfile`: Builds the container image with all dependencies
+- `docker-compose.yml`: Orchestrates the service deployment
+- `setup.sh`: Helper script for installing the command-line client
+- `whisper`: Command-line client script for easy transcription
+
+## 🤝 Contributing
+
+We welcome contributions! Please feel free to submit issues and pull requests.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📝 License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
+
+## 💡 Need Help?
+
+- Check the [FAQs](https://github.com/your-repo/whisper-service/wiki/FAQ) (if available)
+- Open an [issue](https://github.com/your-repo/whisper-service/issues)
+- Read OpenAI's [Whisper documentation](https://github.com/openai/whisper)
+
+---
+
+Built with ❤️ using [OpenAI Whisper](https://github.com/openai/whisper) and [FastAPI](https://fastapi.tiangolo.com/)
