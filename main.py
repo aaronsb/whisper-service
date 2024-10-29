@@ -1,14 +1,17 @@
 # main.py
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 import whisper
 import shutil
 from pathlib import Path
 import time
 import logging
+import asyncio
+import torch
+from typing import Optional
+import gc
 
 # Set up logging
 logging.basicConfig(
@@ -21,9 +24,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Whisper Transcription API",
     description="API for transcribing audio files using OpenAI's Whisper model",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    version="1.0.0"
 )
 
 # Add CORS middleware
@@ -35,8 +36,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variable for the model
+# Global variables
 model = None
+transcription_lock = asyncio.Lock()
 
 @app.on_event("startup")
 async def startup_event():
@@ -44,6 +46,42 @@ async def startup_event():
     logger.info("Loading Whisper model...")
     model = whisper.load_model("base")
     logger.info("Model loaded successfully!")
+
+def cleanup_file(file_path: str):
+    """Clean up temporary file and force garbage collection"""
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            logger.info(f"Cleaned up temporary file: {file_path}")
+        gc.collect()  # Force garbage collection
+    except Exception as e:
+        logger.error(f"Error cleaning up file {file_path}: {str(e)}")
+
+async def process_large_file(file_path: str) -> dict:
+    """Process large audio file with memory optimization"""
+    try:
+        async with transcription_lock:  # Ensure only one transcription at a time
+            logger.info("Starting transcription...")
+            
+            # Force garbage collection before processing
+            gc.collect()
+            
+            # Process the file
+            result = model.transcribe(
+                file_path,
+                verbose=False,      # Reduce logging overhead
+                fp16=False,         # Use FP32 for better stability
+                task='transcribe'
+            )
+            
+            logger.info("Transcription completed successfully")
+            return result
+    except Exception as e:
+        logger.error(f"Error during transcription: {str(e)}")
+        raise
+    finally:
+        # Force garbage collection after processing
+        gc.collect()
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -60,11 +98,6 @@ async def root():
                     line-height: 1.6;
                 }
                 h1 { color: #2563eb; }
-                code { 
-                    background: #f1f5f9;
-                    padding: 0.2rem 0.4rem;
-                    border-radius: 0.2rem;
-                }
                 .endpoint {
                     background: #f8fafc;
                     padding: 1rem;
@@ -75,13 +108,12 @@ async def root():
         </head>
         <body>
             <h1>📝 Whisper Transcription Service</h1>
-            <p>Welcome to the Whisper Transcription Service. This API provides audio transcription capabilities using OpenAI's Whisper model.</p>
+            <p>Optimized for handling large audio files. No file size limit.</p>
             
-            <h2>Available Endpoints:</h2>
             <div class="endpoint">
                 <h3>Transcribe Audio</h3>
                 <code>POST /transcribe/</code>
-                <p>Submit an audio file for transcription.</p>
+                <p>Submit any size audio file for transcription.</p>
             </div>
             
             <div class="endpoint">
@@ -89,22 +121,13 @@ async def root():
                 <code>GET /health</code>
                 <p>Check the service status and supported formats.</p>
             </div>
-            
-            <h2>Documentation</h2>
-            <p>For detailed API documentation:</p>
-            <ul>
-                <li><a href="/docs">Swagger UI Documentation</a></li>
-                <li><a href="/redoc">ReDoc Documentation</a></li>
-            </ul>
         </body>
     </html>
     """
 
 @app.get("/health")
 async def health_check():
-    """
-    Check the health status of the service and get supported formats
-    """
+    """Check the health status of the service"""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
         
@@ -112,15 +135,17 @@ async def health_check():
         "status": "healthy",
         "model": "whisper-base",
         "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
-        "max_file_size_mb": 25
+        "max_file_size": "unlimited",
+        "gpu_available": torch.cuda.is_available()
     }
 
 @app.post("/transcribe/")
-async def transcribe_audio(file: UploadFile = File(...)):
+async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     """
-    Transcribe an audio file using the Whisper model
+    Transcribe an audio file using the Whisper model.
+    Optimized for large files with no size limit.
     """
-    logger.info(f"Received file: {file.filename}")
+    logger.info(f"Received file: {file.filename} for transcription")
     
     # Validate file extension
     file_extension = Path(file.filename).suffix.lower()
@@ -137,31 +162,28 @@ async def transcribe_audio(file: UploadFile = File(...)):
     temp_file_path = f"/app/uploads/temp_{timestamp}{file_extension}"
     
     try:
-        # Save uploaded file
+        # Save uploaded file using chunked transfer
         logger.info(f"Saving uploaded file to {temp_file_path}")
         with open(temp_file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            # Read and write in chunks to handle large files
+            chunk_size = 1024 * 1024  # 1MB chunks
+            while chunk := await file.read(chunk_size):
+                buffer.write(chunk)
         
-        # Check file size (25MB limit)
         file_size = os.path.getsize(temp_file_path)
-        if file_size > 25 * 1024 * 1024:  # 25MB in bytes
-            raise HTTPException(
-                status_code=400,
-                detail="File size too large. Maximum size is 25MB"
-            )
+        logger.info(f"File saved successfully. Size: {file_size:,} bytes")
         
-        logger.info(f"File saved successfully. Size: {file_size} bytes")
-        
-        # Transcribe
-        logger.info("Starting transcription...")
-        result = model.transcribe(temp_file_path)
-        logger.info("Transcription completed successfully")
+        # Process the file
+        result = await process_large_file(temp_file_path)
         
         if not result or not result.get("text"):
             raise HTTPException(
                 status_code=500,
                 detail="Transcription produced no output"
             )
+        
+        # Schedule cleanup
+        background_tasks.add_task(cleanup_file, temp_file_path)
         
         return JSONResponse(content={
             "text": result["text"],
@@ -170,21 +192,14 @@ async def transcribe_audio(file: UploadFile = File(...)):
     
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}")
+        # Clean up in case of error
+        background_tasks.add_task(cleanup_file, temp_file_path)
         raise HTTPException(
             status_code=500,
             detail=f"Transcription failed: {str(e)}"
         )
-    
-    finally:
-        # Cleanup
-        if os.path.exists(temp_file_path):
-            try:
-                os.remove(temp_file_path)
-                logger.info(f"Cleaned up temporary file: {temp_file_path}")
-            except Exception as e:
-                logger.error(f"Error cleaning up temporary file: {str(e)}")
 
-# Add exception handler for unhandled routes
+# Error handlers
 @app.exception_handler(404)
 async def custom_404_handler(request, exc):
     return JSONResponse(
