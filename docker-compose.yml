@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     volumes:
       - ./uploads:/app/uploads
+    user: "${UID}:${GID}"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=all
