@@ -88,6 +88,10 @@ curl -X DELETE "http://localhost:8000/jobs/job_1234567890_abcd"
 curl "http://localhost:8000/health"
 ```
 
+### Via Command-Line Client
+
+A dedicated command-line client is available at [whisper-client](https://github.com/aaronsb/whisper-client), providing a convenient interface for transcribing files, managing jobs, and tracking progress.
+
 ### Utility Scripts
 
 The service includes two utility scripts for processing audio files:
