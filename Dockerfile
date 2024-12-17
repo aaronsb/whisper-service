@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y \
 RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 RUN pip3 install openai-whisper fastapi "uvicorn[standard]" python-multipart
 
-# Create upload directory with appropriate permissions
-RUN mkdir -p /app/uploads && chmod 777 /app/uploads
+# Create upload and temp directories with appropriate permissions
+RUN mkdir -p /app/uploads /app/temp && chmod 777 /app/uploads /app/temp
 
 # Copy the API service code
 COPY main.py .

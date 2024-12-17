@@ -10,13 +10,23 @@ import time
 import logging
 import asyncio
 import torch
-from typing import Optional
 import gc
+import sys
+import tempfile
+import json
+from concurrent.futures import ThreadPoolExecutor
+import threading
+import queue
+import signal
+from typing import Dict
 
-# Set up logging
+# Set up logging to both file and console
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -38,7 +48,11 @@ app.add_middleware(
 
 # Global variables
 model = None
-transcription_lock = asyncio.Lock()
+MAX_CONCURRENT_TRANSCRIPTIONS = 3  # Adjust based on system resources
+transcription_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRANSCRIPTIONS)
+job_queue = queue.Queue()
+active_jobs: Dict[str, dict] = {}  # Store job status information
+job_threads: Dict[str, threading.Thread] = {}  # Store job threads for termination
 
 @app.on_event("startup")
 async def startup_event():
@@ -46,6 +60,14 @@ async def startup_event():
     logger.info("Loading Whisper model...")
     model = whisper.load_model("base")
     logger.info("Model loaded successfully!")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down transcription executor...")
+    transcription_executor.shutdown(wait=False)
+    # Terminate any running jobs
+    for job_id in list(job_threads.keys()):
+        await terminate_job(job_id)
 
 def cleanup_file(file_path: str):
     """Clean up temporary file and force garbage collection"""
@@ -57,30 +79,45 @@ def cleanup_file(file_path: str):
     except Exception as e:
         logger.error(f"Error cleaning up file {file_path}: {str(e)}")
 
-async def process_large_file(file_path: str) -> dict:
+def process_large_file(file_path: str, job_id: str) -> dict:
     """Process large audio file with memory optimization"""
     try:
-        async with transcription_lock:  # Ensure only one transcription at a time
-            logger.info("Starting transcription...")
-            
-            # Force garbage collection before processing
-            gc.collect()
-            
-            # Process the file
-            result = model.transcribe(
-                file_path,
-                verbose=False,      # Reduce logging overhead
-                fp16=False,         # Use FP32 for better stability
-                task='transcribe'
-            )
-            
-            logger.info("Transcription completed successfully")
-            return result
+        if not os.path.exists(file_path):
+            raise Exception(f"Audio file not found: {file_path}")
+
+        logger.info(f"Starting transcription for job {job_id}")
+        active_jobs[job_id]["status"] = "processing"
+        
+        # Force garbage collection before processing
+        gc.collect()
+        
+        # Process the file
+        result = model.transcribe(
+            file_path,
+            verbose=True,
+            fp16=False,
+            task='transcribe'
+        )
+        
+        logger.info(f"Transcription completed successfully for job {job_id}")
+        active_jobs[job_id]["status"] = "completed"
+        active_jobs[job_id]["result"] = {
+            "text": result["text"],
+            "segments": result.get("segments", [])
+        }
+        logger.info(f"Transcription result for job {job_id}: {result['text'][:200]}...")
+        return result
     except Exception as e:
-        logger.error(f"Error during transcription: {str(e)}")
+        error_msg = f"Error during transcription: {str(e)}"
+        logger.error(f"Job {job_id}: {error_msg}")
+        active_jobs[job_id]["status"] = "failed"
+        active_jobs[job_id]["error"] = error_msg
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         raise
     finally:
-        # Force garbage collection after processing
+        if job_id in job_threads:
+            del job_threads[job_id]
         gc.collect()
 
 @app.get("/", response_class=HTMLResponse)
@@ -108,7 +145,7 @@ async def root():
         </head>
         <body>
             <h1>📝 Whisper Transcription Service</h1>
-            <p>Optimized for handling large audio files. No file size limit.</p>
+            <p>Optimized for handling large audio files with concurrent processing.</p>
             
             <div class="endpoint">
                 <h3>Transcribe Audio</h3>
@@ -117,15 +154,27 @@ async def root():
             </div>
             
             <div class="endpoint">
-                <h3>Health Check</h3>
-                <code>GET /health</code>
-                <p>Check the service status and supported formats.</p>
+                <h3>Check Job Status</h3>
+                <code>GET /status/{job_id}</code>
+                <p>Check the status of a transcription job.</p>
             </div>
             
             <div class="endpoint">
-                <h3>API Documentation</h3>
-                <code>GET /docs</code>
-                <p>Access the OpenAPI documentation for this service.</p>
+                <h3>List Active Jobs</h3>
+                <code>GET /jobs</code>
+                <p>List all active transcription jobs.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>Terminate Job</h3>
+                <code>DELETE /jobs/{job_id}</code>
+                <p>Terminate a running transcription job.</p>
+            </div>
+            
+            <div class="endpoint">
+                <h3>Health Check</h3>
+                <code>GET /health</code>
+                <p>Check the service status and supported formats.</p>
             </div>
         </body>
     </html>
@@ -136,20 +185,82 @@ async def health_check():
     """Check the health status of the service"""
     if model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
-        
-    return {
+    
+    return JSONResponse(content={
         "status": "healthy",
         "model": "whisper-base",
         "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
         "max_file_size": "unlimited",
-        "gpu_available": torch.cuda.is_available()
+        "gpu_available": torch.cuda.is_available(),
+        "active_jobs": len(active_jobs),
+        "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
+    })
+
+@app.get("/jobs")
+async def list_jobs():
+    """List all active transcription jobs"""
+    jobs_list = []
+    for job_id, info in active_jobs.items():
+        job_info = {
+            "job_id": job_id,
+            "status": info["status"],
+            "created_at": info["created_at"],
+            "filename": info["filename"]
+        }
+        if info["status"] == "failed" and "error" in info:
+            job_info["message"] = info["error"]
+        jobs_list.append(job_info)
+    
+    return JSONResponse(content={"jobs": jobs_list})
+
+@app.delete("/jobs/{job_id}")
+async def terminate_job(job_id: str):
+    """Terminate a running transcription job"""
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    if active_jobs[job_id]["status"] not in ["processing", "queued"]:
+        raise HTTPException(status_code=400, detail="Job is not running or queued")
+    
+    # Mark job as terminated
+    active_jobs[job_id]["status"] = "terminated"
+    
+    # Mark job as terminated and set flag
+    active_jobs[job_id]["terminated"] = True
+    active_jobs[job_id]["status"] = "terminated"
+    
+    # Remove thread reference if it exists
+    if job_id in job_threads:
+        del job_threads[job_id]
+    
+    return JSONResponse(content={"message": f"Job {job_id} terminated successfully"})
+
+@app.get("/status/{job_id}")
+async def get_job_status(job_id: str):
+    """Get the status of a transcription job"""
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = active_jobs[job_id]
+    response = {
+        "job_id": job_id,
+        "status": job_info["status"],
+        "created_at": job_info["created_at"],
+        "filename": job_info["filename"]
     }
+    
+    if job_info["status"] == "failed":
+        response["message"] = job_info.get("error", "Unknown error occurred")
+    elif job_info["status"] == "completed":
+        response["result"] = job_info.get("result", {})
+    
+    return JSONResponse(content=response)
 
 @app.post("/transcribe/")
-async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+async def transcribe_audio(file: UploadFile = File(...)):
     """
     Transcribe an audio file using the Whisper model.
-    Optimized for large files with no size limit.
+    Optimized for large files with no size limit and concurrent processing.
     """
     logger.info(f"Received file: {file.filename} for transcription")
     
@@ -163,78 +274,70 @@ async def transcribe_audio(background_tasks: BackgroundTasks, file: UploadFile =
             detail=f"Unsupported file type. Supported types: {', '.join(valid_extensions)}"
         )
     
-    # Create a unique filename
-    timestamp = int(time.time())
-    temp_file_path = f"/app/uploads/temp_{timestamp}{file_extension}"
+    # Create a unique job ID
+    job_id = f"job_{int(time.time())}_{os.urandom(4).hex()}"
+    logger.info(f"Created job ID: {job_id}")
     
+    temp_file_path = None
     try:
-        # Save uploaded file using chunked transfer
-        logger.info(f"Saving uploaded file to {temp_file_path}")
-        with open(temp_file_path, "wb") as buffer:
-            # Read and write in chunks to handle large files
+        # Create a temporary file in our dedicated temp directory
+        temp_file_path = os.path.join('/app/temp', f'whisper_{job_id}{file_extension}')
+        with open(temp_file_path, 'wb') as temp_file:
+            logger.info(f"Created temporary file: {temp_file_path}")
+            
+            # Initialize job status
+            active_jobs[job_id] = {
+                "status": "uploading",
+                "created_at": time.time(),
+                "filename": file.filename,
+                "terminated": False,
+                "temp_file": temp_file_path
+            }
+            
+            # Save uploaded file using chunked transfer
             chunk_size = 1024 * 1024  # 1MB chunks
+            total_size = 0
             while chunk := await file.read(chunk_size):
-                buffer.write(chunk)
-        
+                temp_file.write(chunk)
+                total_size += len(chunk)
+            
         file_size = os.path.getsize(temp_file_path)
         logger.info(f"File saved successfully. Size: {file_size:,} bytes")
         
-        # Process the file
-        result = await process_large_file(temp_file_path)
+        # Submit the job to the thread pool
+        active_jobs[job_id]["status"] = "queued"
+        future = transcription_executor.submit(process_large_file, temp_file_path, job_id)
         
-        if not result or not isinstance(result, dict) or 'text' not in result:
-            raise HTTPException(
-                status_code=500,
-                detail="Transcription produced no output"
-            )
+        # Store the thread reference
+        job_threads[job_id] = threading.current_thread()
         
-        # Ensure segments are properly formatted
-        segments = []
-        if 'segments' in result:
-            for segment in result['segments']:
-                segments.append({
-                    'start': float(segment.get('start', 0)),
-                    'end': float(segment.get('end', 0)),
-                    'text': str(segment.get('text', '')).strip()
-                })
-        
-        # Create a clean response
-        response_data = {
-            'text': str(result['text']).strip(),
-            'segments': segments
-        }
-        
-        # Schedule cleanup
-        background_tasks.add_task(cleanup_file, temp_file_path)
-        
-        # Return JSON response
-        return JSONResponse(
-            content=response_data,
-            headers={
-                'Content-Type': 'application/json'
+        # Return job ID for status checking
+        response = {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Transcription job queued successfully",
+            "file_info": {
+                "name": file.filename,
+                "size": file_size
             }
-        )
+        }
+        logger.info(f"Job created successfully: {json.dumps(response)}")
+        return JSONResponse(content=response)
     
     except Exception as e:
         logger.error(f"Error during transcription: {str(e)}")
+        # Update job status
+        if job_id in active_jobs:
+            active_jobs[job_id]["status"] = "failed"
+            active_jobs[job_id]["error"] = str(e)
         # Clean up in case of error
-        background_tasks.add_task(cleanup_file, temp_file_path)
+        if temp_file_path and os.path.exists(temp_file_path):
+            cleanup_file(temp_file_path)
         raise HTTPException(
             status_code=500,
             detail=f"Transcription failed: {str(e)}"
         )
 
-# Error handlers
-@app.exception_handler(404)
-async def custom_404_handler(request, exc):
-    return JSONResponse(
-        status_code=404,
-        content={"detail": "Endpoint not found. Visit / for available endpoints."}
-    )
-
-@app.exception_handler(500)
-async def custom_500_handler(request, exc):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": "Internal server error. Please try again later."}
-    )
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
