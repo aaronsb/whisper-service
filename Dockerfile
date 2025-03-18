@@ -30,4 +30,4 @@ RUN chown -R whisper:whisper /app
 USER whisper
 
 # Default command to run service
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9673", "--reload"]
