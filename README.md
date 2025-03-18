@@ -31,25 +31,41 @@ You'll need:
 - For API mode:
   - OpenAI API key with access to the Whisper API
 
-### Installation
+### Detailed Installation Guide
 
-1. Clone this repository:
+1. **Clone this repository**:
 ```bash
 git clone https://github.com/your-repo/whisper-service
 cd whisper-service
 ```
 
-2. Run the configuration script to choose between local compute or API mode:
+2. **Make the configuration and build scripts executable**:
+```bash
+chmod +x configure.sh build-image.sh
+```
+
+3. **Run the configuration script** to choose between local compute or API mode:
 ```bash
 ./configure.sh
 ```
 
-3. Build the Docker image:
+   This interactive script will:
+   - Ask you to choose between local compute or API mode
+   - If you choose API mode, prompt you for your OpenAI API key
+   - Create a `.env` file with your configuration settings
+   - Set the appropriate environment variables
+
+4. **Build the Docker image**:
 ```bash
 ./build-image.sh
 ```
 
-4. Start the service:
+   This script will:
+   - Read your configuration from the `.env` file
+   - Build the appropriate Docker image based on your selected mode
+   - Tag the image for use with Docker Compose
+
+5. **Start the service**:
 ```bash
 # For local mode (default)
 docker compose up -d
@@ -58,13 +74,35 @@ docker compose up -d
 docker compose -f docker-compose.api.yml up -d
 ```
 
+6. **Verify the service is running**:
+```bash
+# Check container status
+docker ps
+
+# Check service logs
+docker logs -f whisper-service_whisper-api_1
+```
+
+7. **Access the service** at http://localhost:9673
+
+### API Key Configuration
+
+For API mode, you'll need an OpenAI API key with access to the Whisper API:
+
+1. Sign up or log in to your [OpenAI account](https://platform.openai.com/)
+2. Navigate to the API keys section
+3. Create a new API key with appropriate permissions
+4. When running `./configure.sh`, select option 2 (OpenAI API) and paste your API key when prompted
+
+If you need to change your API key later, simply run `./configure.sh` again and select the API mode option.
+
 ## 🎯 Using the Service
 
 ### Via Web Interface
 
-1. Open `http://localhost:8000` in your browser
+1. Open `http://localhost:9673` in your browser
 2. You'll see a simple interface listing all available endpoints
-3. Visit `http://localhost:8000/docs` for interactive API documentation
+3. Visit `http://localhost:9673/docs` for interactive API documentation
 
 ### Via REST API
 
@@ -72,7 +110,7 @@ The service provides several endpoints for managing transcription jobs:
 
 #### Submit a Transcription Job
 ```bash
-curl -X POST "http://localhost:8000/transcribe/" \
+curl -X POST "http://localhost:9673/transcribe/" \
      -F "file=@path/to/your/audio.mp3"
 ```
 Response:
@@ -90,22 +128,22 @@ Response:
 
 #### Check Job Status
 ```bash
-curl "http://localhost:8000/status/job_1234567890_abcd"
+curl "http://localhost:9673/status/job_1234567890_abcd"
 ```
 
 #### List All Jobs
 ```bash
-curl "http://localhost:8000/jobs"
+curl "http://localhost:9673/jobs"
 ```
 
 #### Terminate a Job
 ```bash
-curl -X DELETE "http://localhost:8000/jobs/job_1234567890_abcd"
+curl -X DELETE "http://localhost:9673/jobs/job_1234567890_abcd"
 ```
 
 #### Check Service Health
 ```bash
-curl "http://localhost:8000/health"
+curl "http://localhost:9673/health"
 ```
 
 ### Via Command-Line Client
