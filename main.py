@@ -254,6 +254,7 @@ async def health_check():
     if TRANSCRIPTION_MODE == "api" and not OPENAI_API_KEY:
         logger.warning("OPENAI_API_KEY environment variable not set. API transcription will fail.")
     
+    # Create the response dictionary
     response = {
         "status": "healthy",
         "transcription_mode": TRANSCRIPTION_MODE,
@@ -271,6 +272,7 @@ async def health_check():
         response["model"] = "whisper-1 (OpenAI API)"
         response["api_key_configured"] = bool(OPENAI_API_KEY)
     
+    # Use json.dumps to ensure proper JSON formatting
     return JSONResponse(content=response)
 
 @app.get("/jobs")
@@ -288,6 +290,7 @@ async def list_jobs():
             job_info["message"] = info["error"]
         jobs_list.append(job_info)
     
+    # Use json.dumps to ensure proper JSON formatting
     return JSONResponse(content={"jobs": jobs_list})
 
 @app.delete("/jobs/{job_id}")
@@ -331,6 +334,7 @@ async def get_job_status(job_id: str):
     elif job_info["status"] == "completed":
         response["result"] = job_info.get("result", {})
     
+    # Use json.dumps to ensure proper JSON formatting
     return JSONResponse(content=response)
 
 @app.post("/transcribe/")
@@ -417,4 +421,4 @@ async def transcribe_audio(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000, log_level="debug")
+    uvicorn.run(app, host="0.0.0.0", port=9673, log_level="debug")
