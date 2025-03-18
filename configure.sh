@@ -23,8 +23,9 @@ validate_api_key() {
     fi
     
     # Basic format validation (simple check for typical length and format)
-    if [[ ! $api_key =~ ^sk-[A-Za-z0-9]{32,}$ ]]; then
-        echo -e "${RED}Warning: API key format doesn't match expected pattern (should start with 'sk-' followed by at least 32 characters).${NC}"
+    # Accept both traditional format (sk-...) and project-based format (sk-proj-...)
+    if [[ ! $api_key =~ ^sk-[A-Za-z0-9-_]{32,}$ ]]; then
+        echo -e "${RED}Warning: API key format doesn't appear to be valid. OpenAI API keys typically start with 'sk-' followed by a long string of characters.${NC}"
         echo -e "Do you want to continue anyway? (y/n)"
         read -r continue_anyway
         if [[ "$continue_anyway" != "y" && "$continue_anyway" != "Y" ]]; then
