@@ -1,0 +1,31 @@
+# Dockerfile.api
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip3 install fastapi "uvicorn[standard]" python-multipart openai requests
+
+# Create upload and temp directories with appropriate permissions
+RUN mkdir -p /app/uploads /app/temp && chmod 777 /app/uploads /app/temp
+
+# Copy the API service code
+COPY main.py .
+COPY process_whisper.py .
+
+# Set environment variables
+ENV TRANSCRIPTION_MODE=api
+ENV TOKENIZERS_PARALLELISM=true
+
+# Run as non-root user for better security
+RUN useradd -m -u 1000 whisper
+RUN chown -R whisper:whisper /app
+USER whisper
+
+# Default command to run service
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9673", "--reload"]

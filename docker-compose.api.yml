@@ -1,0 +1,24 @@
+# docker-compose.api.yml
+services:
+  whisper-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "9673:9673"
+    volumes:
+      - ./uploads:/app/uploads
+    user: "${UID}:${GID}"
+    environment:
+      - TRANSCRIPTION_MODE=api
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+    restart: unless-stopped  # Ensures service keeps running
+    command: >
+      uvicorn main:app
+      --host 0.0.0.0
+      --port 9673
+      --timeout-keep-alive 300
+      --workers 1
+      --log-level info
+      --reload
+      --reload-dir /app

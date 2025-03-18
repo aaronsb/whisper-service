@@ -3,13 +3,11 @@ import os
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
-import whisper
 import shutil
 from pathlib import Path
 import time
 import logging
 import asyncio
-import torch
 import gc
 import sys
 import tempfile
@@ -18,7 +16,16 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import queue
 import signal
-from typing import Dict
+from typing import Dict, Optional
+import requests
+
+# Conditionally import whisper and torch for local mode
+TRANSCRIPTION_MODE = os.environ.get("TRANSCRIPTION_MODE", "local").lower()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+
+if TRANSCRIPTION_MODE == "local":
+    import whisper
+    import torch
 
 # Set up logging to both file and console
 logging.basicConfig(
@@ -57,9 +64,14 @@ job_threads: Dict[str, threading.Thread] = {}  # Store job threads for terminati
 @app.on_event("startup")
 async def startup_event():
     global model
-    logger.info("Loading Whisper model...")
-    model = whisper.load_model("base")
-    logger.info("Model loaded successfully!")
+    if TRANSCRIPTION_MODE == "local":
+        logger.info("Loading local Whisper model...")
+        model = whisper.load_model("base")
+        logger.info("Local model loaded successfully!")
+    else:
+        logger.info("Using OpenAI Whisper API for transcription")
+        if not OPENAI_API_KEY:
+            logger.warning("OPENAI_API_KEY environment variable not set. API transcription will fail.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -91,13 +103,11 @@ def process_large_file(file_path: str, job_id: str) -> dict:
         # Force garbage collection before processing
         gc.collect()
         
-        # Process the file
-        result = model.transcribe(
-            file_path,
-            verbose=True,
-            fp16=False,
-            task='transcribe'
-        )
+        # Process the file based on the transcription mode
+        if TRANSCRIPTION_MODE == "local":
+            result = process_with_local_model(file_path)
+        else:
+            result = process_with_openai_api(file_path)
         
         logger.info(f"Transcription completed successfully for job {job_id}")
         active_jobs[job_id]["status"] = "completed"
@@ -112,13 +122,68 @@ def process_large_file(file_path: str, job_id: str) -> dict:
         logger.error(f"Job {job_id}: {error_msg}")
         active_jobs[job_id]["status"] = "failed"
         active_jobs[job_id]["error"] = error_msg
-        if torch.cuda.is_available():
+        if TRANSCRIPTION_MODE == "local" and torch.cuda.is_available():
             torch.cuda.empty_cache()
         raise
     finally:
         if job_id in job_threads:
             del job_threads[job_id]
         gc.collect()
+
+def process_with_local_model(file_path: str) -> dict:
+    """Process audio file using local Whisper model"""
+    # Process the file with local model
+    result = model.transcribe(
+        file_path,
+        verbose=True,
+        fp16=False,
+        task='transcribe'
+    )
+    return result
+
+def process_with_openai_api(file_path: str) -> dict:
+    """Process audio file using OpenAI Whisper API"""
+    if not OPENAI_API_KEY:
+        raise Exception("OpenAI API key not provided. Set the OPENAI_API_KEY environment variable.")
+    
+    logger.info(f"Sending file to OpenAI Whisper API: {file_path}")
+    
+    try:
+        # Open the audio file
+        with open(file_path, "rb") as audio_file:
+            # Call OpenAI's Whisper API
+            headers = {
+                "Authorization": f"Bearer {OPENAI_API_KEY}"
+            }
+            
+            # Use the OpenAI API endpoint for audio transcription
+            response = requests.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers=headers,
+                files={"file": audio_file},
+                data={"model": "whisper-1"}
+            )
+            
+            # Check for successful response
+            if response.status_code != 200:
+                error_message = f"API request failed with status {response.status_code}: {response.text}"
+                logger.error(error_message)
+                raise Exception(error_message)
+            
+            # Parse the response
+            api_response = response.json()
+            
+            # Convert API response to match local model format
+            result = {
+                "text": api_response.get("text", ""),
+                "segments": []  # OpenAI API might not provide segments in the same format
+            }
+            
+            return result
+            
+    except Exception as e:
+        logger.error(f"Error in OpenAI API transcription: {str(e)}")
+        raise
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
@@ -183,18 +248,30 @@ async def root():
 @app.get("/health")
 async def health_check():
     """Check the health status of the service"""
-    if model is None:
+    if TRANSCRIPTION_MODE == "local" and model is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
     
-    return JSONResponse(content={
+    if TRANSCRIPTION_MODE == "api" and not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY environment variable not set. API transcription will fail.")
+    
+    response = {
         "status": "healthy",
-        "model": "whisper-base",
+        "transcription_mode": TRANSCRIPTION_MODE,
         "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
         "max_file_size": "unlimited",
-        "gpu_available": torch.cuda.is_available(),
         "active_jobs": len(active_jobs),
         "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
-    })
+    }
+    
+    # Add mode-specific information
+    if TRANSCRIPTION_MODE == "local":
+        response["model"] = "whisper-base"
+        response["gpu_available"] = torch.cuda.is_available()
+    else:
+        response["model"] = "whisper-1 (OpenAI API)"
+        response["api_key_configured"] = bool(OPENAI_API_KEY)
+    
+    return JSONResponse(content=response)
 
 @app.get("/jobs")
 async def list_jobs():

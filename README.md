@@ -1,13 +1,17 @@
 # 🎙️ Whisper Transcription Service
 
-A Docker-powered service that transcribes audio files using OpenAI's Whisper model. This service is optimized for handling audio files of any size and runs locally on your machine using GPU acceleration (if available).
+A Docker-powered service that transcribes audio files using OpenAI's Whisper model. This service is optimized for handling audio files of any size and offers two modes of operation:
+
+1. **Local Compute Mode**: Runs the Whisper model locally on your machine using GPU acceleration (if available)
+2. **API Mode**: Uses OpenAI's Whisper API for transcription, requiring less computational resources
 
 ## ✨ Features
 
 - 🚀 Easy setup with Docker
+- 🔄 Flexible configuration with local or API-based transcription
 - 📦 No file size limits with optimized memory handling
 - 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .ogg, .flac)
-- ⚡ GPU acceleration with CUDA 12.1 support
+- ⚡ GPU acceleration with CUDA 12.1 support (local mode)
 - 🔄 Concurrent processing with job management
 - 🔍 Real-time job status tracking
 - 🧹 Automatic memory cleanup and optimization
@@ -21,9 +25,11 @@ A Docker-powered service that transcribes audio files using OpenAI's Whisper mod
 
 You'll need:
 - Docker and Docker Compose installed on your machine
-- NVIDIA GPU with CUDA 12.1 support (optional, but recommended for better performance)
-- NVIDIA Container Toolkit (if using GPU)
-- FFmpeg (installed automatically in container)
+- For local mode:
+  - NVIDIA GPU with CUDA 12.1 support (optional, but recommended for better performance)
+  - NVIDIA Container Toolkit (if using GPU)
+- For API mode:
+  - OpenAI API key with access to the Whisper API
 
 ### Installation
 
@@ -33,9 +39,23 @@ git clone https://github.com/your-repo/whisper-service
 cd whisper-service
 ```
 
-2. Start the service:
+2. Run the configuration script to choose between local compute or API mode:
 ```bash
-docker compose up --build
+./configure.sh
+```
+
+3. Build the Docker image:
+```bash
+./build-image.sh
+```
+
+4. Start the service:
+```bash
+# For local mode (default)
+docker compose up -d
+
+# For API mode
+docker compose -f docker-compose.api.yml up -d
 ```
 
 ## 🎯 Using the Service
@@ -112,9 +132,34 @@ This will process all JSON transcription files in the directory and create corre
 
 ## 🔧 Configuration
 
+### Choosing Between Local and API Mode
+
+The service offers two modes of operation:
+
+1. **Local Compute Mode**:
+   - Uses the Whisper model running locally in the container
+   - Requires more computational resources
+   - Benefits from GPU acceleration if available
+   - No API key required
+   - Better for high-volume transcription or privacy-sensitive applications
+
+2. **API Mode**:
+   - Uses OpenAI's Whisper API for transcription
+   - Requires less computational resources
+   - Requires an OpenAI API key
+   - May have usage limits based on your OpenAI plan
+   - Better for lightweight deployments or when GPU is not available
+
+You can switch between modes using the `configure.sh` script, which will:
+- Set the appropriate environment variables
+- Create a `.env` file with your configuration
+- Guide you through API key setup if needed
+
 ### Performance Optimization
 
-The service includes several performance optimizations configured in the Dockerfile:
+#### Local Mode Optimizations
+
+The local mode includes several performance optimizations configured in the Dockerfile:
 
 ```dockerfile
 # GPU Memory Optimization
@@ -126,7 +171,7 @@ ENV TOKENIZERS_PARALLELISM=true
 
 These environment variables can be adjusted in the Dockerfile to optimize performance for your specific use case.
 
-### Docker Compose Configuration
+#### Docker Compose Configuration
 
 The service is configured in `docker-compose.yml` with optimized settings for handling large audio files:
 
@@ -141,45 +186,25 @@ services:
     command: >
       uvicorn main:app
       --host 0.0.0.0
-      --port 8000
+      --port 9673
       --timeout-keep-alive 300  # Keep-alive timeout in seconds
       --workers 1              # Number of worker processes
       --log-level info
       --reload                # Auto-reload on code changes (development)
 ```
 
-These settings can be adjusted based on your system resources and requirements:
-
-- `shm_size`: Increase for better performance with large files
-- `workers`: Increase for better concurrent request handling (if CPU allows)
-- `timeout-keep-alive`: Adjust based on expected transcription durations
-- `--reload`: Remove in production for better performance
+These settings can be adjusted based on your system resources and requirements.
 
 ### Security Configuration
 
-The service runs as a non-root user for enhanced security:
+The service runs as a non-root user for enhanced security in both modes:
 - Dedicated 'whisper' user created in container
 - All processes run with limited permissions
-- Upload and temp directories with controlled access (777 permissions required for operation)
+- Upload and temp directories with controlled access
 
-### GPU Support
+### GPU Support (Local Mode Only)
 
-The service automatically detects and uses your NVIDIA GPU if available. GPU support is configured in `docker-compose.yml`:
-
-```yaml
-environment:
-  - NVIDIA_VISIBLE_DEVICES=all
-  - NVIDIA_DRIVER_CAPABILITIES=all
-deploy:
-  resources:
-    reservations:
-      devices:
-        - driver: nvidia
-          count: 1
-          capabilities: [gpu]
-```
-
-To disable GPU support, simply remove these sections from the docker-compose.yml file.
+In local mode, the service automatically detects and uses your NVIDIA GPU if available. GPU support is configured in `docker-compose.yml`.
 
 ## 🔍 API Response Formats
 
@@ -212,39 +237,59 @@ To disable GPU support, simply remove these sections from the docker-compose.yml
 
 ## 🚨 Common Issues & Solutions
 
+### General Issues
+
+1. **"Error: Job queue full"**
+   - Wait for current jobs to complete
+   - Monitor active jobs using the /jobs endpoint
+   - Consider adjusting the number of workers if system resources allow
+
+2. **Permission Issues**
+   - Ensure upload/temp directories have correct permissions
+   - Verify Docker user mapping if using custom UID/GID
+   - Check file ownership in container
+
+### Local Mode Issues
+
 1. **"Error: GPU not available"**
    - Check CUDA 12.1 compatibility with your GPU
    - Verify NVIDIA Container Toolkit is installed
    - Try running `nvidia-smi` to confirm GPU is detected
 
-2. **"Error: Job queue full"**
-   - Wait for current jobs to complete
-   - Monitor active jobs using the /jobs endpoint
-   - Consider adjusting the number of workers if system resources allow
-
-3. **Memory Issues with Large Files**
+2. **Memory Issues with Large Files**
    - Increase `shm_size` in docker-compose.yml
    - Adjust PYTORCH_CUDA_ALLOC_CONF in Dockerfile
    - Monitor container resources with `docker stats`
 
-4. **Service Performance**
+3. **Service Performance**
    - Remove `--reload` flag in production
    - Adjust number of workers based on CPU cores
    - Consider GPU acceleration for faster processing
    - Tune TOKENIZERS_PARALLELISM based on workload
 
-5. **Permission Issues**
-   - Ensure upload/temp directories have correct permissions
-   - Verify Docker user mapping if using custom UID/GID
-   - Check file ownership in container
+### API Mode Issues
+
+1. **"Error: OpenAI API key not provided"**
+   - Run `./configure.sh` again to set up your API key
+   - Verify the API key is correctly set in the .env file
+   - Check that the API key has access to the Whisper API
+
+2. **"Error: API request failed"**
+   - Check your OpenAI account for API limits or billing issues
+   - Verify network connectivity from the container
+   - Check for any OpenAI service outages
 
 ## 🔍 Understanding the Components
 
 - `main.py`: FastAPI application with job management and API endpoints
 - `process_audio.py`: Direct audio transcription utility
 - `process_whisper.py`: JSON transcript to text converter
-- `Dockerfile`: Container image definition with CUDA support and optimizations
-- `docker-compose.yml`: Service orchestration and resource configuration
+- `Dockerfile`: Container image definition for local mode with CUDA support
+- `Dockerfile.api`: Container image definition for API mode (lightweight)
+- `docker-compose.yml`: Service orchestration for local mode
+- `docker-compose.api.yml`: Service orchestration for API mode
+- `configure.sh`: Configuration script to choose between local and API modes
+- `build-image.sh`: Script to build the appropriate Docker image
 
 ## 🤝 Contributing
 
