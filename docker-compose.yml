@@ -3,7 +3,7 @@ services:
   whisper-api:
     build: .
     ports:
-      - "8000:8000"
+      - "9673:9673"
     volumes:
       - ./uploads:/app/uploads
     user: "${UID}:${GID}"
@@ -25,7 +25,7 @@ services:
     command: >
       uvicorn main:app
       --host 0.0.0.0
-      --port 8000
+      --port 9673
       --timeout-keep-alive 300
       --workers 1
       --log-level info
