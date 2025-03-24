@@ -4,7 +4,21 @@ import os
 import json
 import argparse
 import requests
+import logging
 from pathlib import Path
+
+# Import the audio chunker module
+from audio_chunker import AudioChunker, check_file_size, MAX_FILE_SIZE_MB
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # Determine transcription mode from environment variable
 TRANSCRIPTION_MODE = os.environ.get("TRANSCRIPTION_MODE", "local").lower()
@@ -26,12 +40,24 @@ def process_audio_local(input_file):
     return result
 
 def process_audio_api(input_file):
-    """Process audio using OpenAI Whisper API"""
-    print(f"Processing {input_file} with OpenAI Whisper API...")
+    """Process audio using OpenAI Whisper API with chunking for large files"""
+    logger.info(f"Processing {input_file} with OpenAI Whisper API...")
     
     if not OPENAI_API_KEY:
         raise ValueError("OpenAI API key not provided. Set the OPENAI_API_KEY environment variable.")
     
+    # Check if file needs chunking
+    file_size_mb = check_file_size(input_file)
+    
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        logger.info(f"File size ({file_size_mb:.2f} MB) exceeds limit ({MAX_FILE_SIZE_MB} MB). Using chunking.")
+        return process_large_file_with_chunking(input_file)
+    else:
+        logger.info(f"File size ({file_size_mb:.2f} MB) within limit. Processing normally.")
+        return process_single_file_with_api(input_file)
+
+def process_single_file_with_api(input_file):
+    """Process a single file with the OpenAI Whisper API"""
     try:
         # Open the audio file
         with open(input_file, "rb") as audio_file:
@@ -51,7 +77,7 @@ def process_audio_api(input_file):
             # Check for successful response
             if response.status_code != 200:
                 error_message = f"API request failed with status {response.status_code}: {response.text}"
-                print(error_message)
+                logger.error(error_message)
                 raise Exception(error_message)
             
             # Parse the response
@@ -66,7 +92,44 @@ def process_audio_api(input_file):
             return result
             
     except Exception as e:
-        print(f"Error in OpenAI API transcription: {str(e)}")
+        logger.error(f"Error in OpenAI API transcription: {str(e)}")
+        raise
+
+def process_large_file_with_chunking(input_file):
+    """Process a large audio file by chunking it and processing each chunk"""
+    logger.info(f"Processing large file with chunking: {input_file}")
+    
+    try:
+        # Create a temporary directory for chunks
+        temp_dir = os.path.join(os.path.dirname(input_file), "temp_chunks")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Initialize the audio chunker
+        chunker = AudioChunker(
+            input_file,
+            output_dir=temp_dir
+        )
+        
+        # Create chunks
+        chunks = chunker.create_chunks()
+        if not chunks:
+            raise Exception("Failed to create chunks from the audio file")
+        
+        logger.info(f"Created {len(chunks)} chunks for processing")
+        
+        # Process each chunk
+        chunk_results = chunker.process_chunks(process_single_file_with_api)
+        
+        # Reassemble the transcriptions
+        result = chunker.reassemble_transcriptions(chunk_results)
+        
+        # Clean up temporary files
+        chunker.cleanup()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in chunked processing: {str(e)}")
         raise
 
 def process_audio(input_file):
@@ -88,9 +151,9 @@ def process_audio(input_file):
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
     
-    print(f"Transcription saved to {output_path}")
-    print("\nTranscription text:")
-    print(result["text"])
+    logger.info(f"Transcription saved to {output_path}")
+    logger.info("\nTranscription text:")
+    logger.info(result["text"][:200] + "..." if len(result["text"]) > 200 else result["text"])
     
     return result
 

@@ -16,6 +16,8 @@ RUN mkdir -p /app/uploads /app/temp && chmod 777 /app/uploads /app/temp
 
 # Copy the API service code
 COPY main.py .
+COPY process_audio.py .
+COPY audio_chunker.py .
 COPY process_whisper.py .
 
 # Set environment variables

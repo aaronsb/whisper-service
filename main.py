@@ -23,6 +23,9 @@ import requests
 TRANSCRIPTION_MODE = os.environ.get("TRANSCRIPTION_MODE", "local").lower()
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 
+# Import audio chunker for large file handling
+from audio_chunker import AudioChunker, check_file_size, MAX_FILE_SIZE_MB
+
 if TRANSCRIPTION_MODE == "local":
     import whisper
     import torch
@@ -142,10 +145,22 @@ def process_with_local_model(file_path: str) -> dict:
     return result
 
 def process_with_openai_api(file_path: str) -> dict:
-    """Process audio file using OpenAI Whisper API"""
+    """Process audio file using OpenAI Whisper API with chunking for large files"""
     if not OPENAI_API_KEY:
         raise Exception("OpenAI API key not provided. Set the OPENAI_API_KEY environment variable.")
     
+    # Check if file needs chunking
+    file_size_mb = check_file_size(file_path)
+    
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        logger.info(f"File size ({file_size_mb:.2f} MB) exceeds limit ({MAX_FILE_SIZE_MB} MB). Using chunking.")
+        return process_large_file_with_chunking(file_path)
+    else:
+        logger.info(f"File size ({file_size_mb:.2f} MB) within limit. Processing normally.")
+        return process_single_file_with_api(file_path)
+
+def process_single_file_with_api(file_path: str) -> dict:
+    """Process a single file with the OpenAI Whisper API"""
     logger.info(f"Sending file to OpenAI Whisper API: {file_path}")
     
     try:
@@ -183,6 +198,43 @@ def process_with_openai_api(file_path: str) -> dict:
             
     except Exception as e:
         logger.error(f"Error in OpenAI API transcription: {str(e)}")
+        raise
+
+def process_large_file_with_chunking(file_path: str) -> dict:
+    """Process a large audio file by chunking it and processing each chunk"""
+    logger.info(f"Processing large file with chunking: {file_path}")
+    
+    try:
+        # Create a temporary directory for chunks
+        temp_dir = os.path.join(os.path.dirname(file_path), "temp_chunks")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Initialize the audio chunker
+        chunker = AudioChunker(
+            file_path,
+            output_dir=temp_dir
+        )
+        
+        # Create chunks
+        chunks = chunker.create_chunks()
+        if not chunks:
+            raise Exception("Failed to create chunks from the audio file")
+        
+        logger.info(f"Created {len(chunks)} chunks for processing")
+        
+        # Process each chunk
+        chunk_results = chunker.process_chunks(process_single_file_with_api)
+        
+        # Reassemble the transcriptions
+        result = chunker.reassemble_transcriptions(chunk_results)
+        
+        # Clean up temporary files
+        chunker.cleanup()
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in chunked processing: {str(e)}")
         raise
 
 @app.get("/", response_class=HTMLResponse)
@@ -259,7 +311,6 @@ async def health_check():
         "status": "healthy",
         "transcription_mode": TRANSCRIPTION_MODE,
         "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
-        "max_file_size": "unlimited",
         "active_jobs": len(active_jobs),
         "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
     }
@@ -268,9 +319,12 @@ async def health_check():
     if TRANSCRIPTION_MODE == "local":
         response["model"] = "whisper-base"
         response["gpu_available"] = torch.cuda.is_available()
+        response["max_file_size"] = "unlimited"
     else:
         response["model"] = "whisper-1 (OpenAI API)"
         response["api_key_configured"] = bool(OPENAI_API_KEY)
+        response["max_file_size"] = f"{MAX_FILE_SIZE_MB}MB (larger files will be automatically chunked)"
+        response["chunking_enabled"] = True
     
     # Use json.dumps to ensure proper JSON formatting
     return JSONResponse(content=response)
