@@ -18,6 +18,8 @@ A Docker-powered service that transcribes audio files using OpenAI's Whisper mod
 - 🔒 Secure file handling with non-root user execution
 - 🌐 RESTful API with comprehensive endpoints
 - 📝 Convenient command-line utilities
+- 📊 Streaming response for efficient handling of large transcripts
+- 🔍 Optional transcript retrieval for faster status checks
 
 ## 🚀 Quick Start
 
@@ -128,7 +130,11 @@ Response:
 
 #### Check Job Status
 ```bash
+# Get job status with full transcript (default)
 curl "http://localhost:9673/status/job_1234567890_abcd"
+
+# Get job status without transcript (faster for large transcripts)
+curl "http://localhost:9673/status/job_1234567890_abcd?include_transcript=false"
 ```
 
 #### List All Jobs
@@ -140,6 +146,13 @@ curl "http://localhost:9673/jobs"
 ```bash
 curl -X DELETE "http://localhost:9673/jobs/job_1234567890_abcd"
 ```
+
+#### Stream Transcript (Optimized for Large Transcripts)
+```bash
+# Stream the transcript for a completed job
+curl "http://localhost:9673/transcript/job_1234567890_abcd"
+```
+This endpoint uses HTTP streaming to efficiently transfer large transcripts without memory issues.
 
 #### Check Service Health
 ```bash

@@ -1,7 +1,7 @@
 # main.py
 import os
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Query
+from fastapi.responses import JSONResponse, HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import shutil
 from pathlib import Path
@@ -326,6 +326,12 @@ async def root():
                 <code>GET /health</code>
                 <p>Check the service status and supported formats.</p>
             </div>
+            
+            <div class="endpoint">
+                <h3>Stream Transcript</h3>
+                <code>GET /transcript/{job_id}</code>
+                <p>Stream the transcript for a completed job (optimized for large transcripts).</p>
+            </div>
         </body>
     </html>
     """
@@ -403,8 +409,14 @@ async def terminate_job(job_id: str):
     return JSONResponse(content={"message": f"Job {job_id} terminated successfully"})
 
 @app.get("/status/{job_id}")
-async def get_job_status(job_id: str):
-    """Get the status of a transcription job"""
+async def get_job_status(job_id: str, include_transcript: bool = True):
+    """
+    Get the status of a transcription job
+    
+    Parameters:
+    - job_id: The ID of the job to check
+    - include_transcript: Whether to include the full transcript in the response (default: True)
+    """
     if job_id not in active_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -425,10 +437,49 @@ async def get_job_status(job_id: str):
     if job_info["status"] == "failed":
         response["message"] = job_info.get("error", "Unknown error occurred")
     elif job_info["status"] == "completed":
-        response["result"] = job_info.get("result", {})
+        if include_transcript:
+            response["result"] = job_info.get("result", {})
+        else:
+            # Just indicate transcript is available but don't include it
+            response["transcript_available"] = True
+            if "result" in job_info and "text" in job_info["result"]:
+                response["transcript_size"] = len(job_info["result"]["text"])
     
     # Use json.dumps to ensure proper JSON formatting
     return JSONResponse(content=response)
+
+@app.get("/transcript/{job_id}")
+async def get_transcript_streaming(job_id: str):
+    """
+    Get the transcript for a completed job using streaming response.
+    This endpoint is optimized for large transcripts and efficiently streams the data.
+    """
+    if job_id not in active_jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_info = active_jobs[job_id]
+    
+    if job_info["status"] != "completed":
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Job is not completed. Current status: {job_info['status']}"
+        )
+    
+    if "result" not in job_info:
+        raise HTTPException(status_code=404, detail="Transcript not found for this job")
+    
+    # Get the transcript data
+    result = job_info["result"]
+    
+    # Create a streaming response
+    async def generate():
+        yield json.dumps(result, ensure_ascii=False)
+    
+    logger.info(f"Streaming transcript for job {job_id}")
+    return StreamingResponse(
+        generate(),
+        media_type="application/json"
+    )
 
 @app.post("/transcribe/")
 async def transcribe_audio(file: UploadFile = File(...)):
