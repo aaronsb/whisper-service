@@ -66,12 +66,16 @@ def process_single_file_with_api(input_file):
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
-            # Use the OpenAI API endpoint for audio transcription
+            # Use the OpenAI API endpoint for audio transcription with timestamps
             response = requests.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers=headers,
                 files={"file": audio_file},
-                data={"model": "whisper-1"}
+                data={
+                    "model": "whisper-1",
+                    "response_format": "verbose_json",  # Request detailed response
+                    "timestamp_granularities": ["segment"]  # Request segment timestamps
+                }
             )
             
             # Check for successful response
@@ -83,10 +87,15 @@ def process_single_file_with_api(input_file):
             # Parse the response
             api_response = response.json()
             
+            # Extract segments with timestamps if available
+            segments = []
+            if "segments" in api_response:
+                segments = api_response["segments"]
+            
             # Convert API response to match local model format
             result = {
                 "text": api_response.get("text", ""),
-                "segments": []  # OpenAI API might not provide segments in the same format
+                "segments": segments
             }
             
             return result

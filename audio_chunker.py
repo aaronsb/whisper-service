@@ -425,7 +425,63 @@ class AudioChunker:
         self.output_dir = output_dir or tempfile.mkdtemp(prefix="whisper_chunks_")
         self.chunks = []
         
+        # Add progress tracking
+        self.total_duration = self._get_audio_duration(file_path)
+        self.processed_duration = 0
+        self.total_chunks = 0
+        self.processed_chunks = 0
+        
         logger.info(f"Initialized AudioChunker for {file_path}")
+    
+    def _get_audio_duration(self, file_path: str) -> float:
+        """
+        Get the duration of an audio file in seconds.
+        
+        Args:
+            file_path: Path to the audio file
+            
+        Returns:
+            Duration in seconds
+        """
+        duration_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+        
+        try:
+            duration_result = subprocess.run(
+                duration_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True
+            )
+            return float(duration_result.stdout.strip())
+        except Exception as e:
+            logger.error(f"Error getting audio duration: {e}")
+            return 0
+    
+    def get_progress(self) -> Dict[str, Any]:
+        """
+        Get the current progress information.
+        
+        Returns:
+            Dictionary with progress information
+        """
+        if self.total_duration == 0:
+            percentage = 0
+        else:
+            percentage = (self.processed_duration / self.total_duration) * 100
+            
+        return {
+            "total_duration": round(self.total_duration, 2),
+            "processed_duration": round(self.processed_duration, 2),
+            "total_chunks": self.total_chunks,
+            "processed_chunks": self.processed_chunks,
+            "percentage": round(percentage, 2)
+        }
     
     def needs_chunking(self) -> bool:
         """
@@ -501,7 +557,48 @@ class AudioChunker:
             logger.warning("No chunks to process. Call create_chunks() first.")
             return []
         
-        return process_chunks(self.chunks, process_func)
+        self.total_chunks = len(self.chunks)
+        self.processed_chunks = 0
+        
+        results = []
+        chunk_durations = []
+        
+        # First, get the duration of each chunk
+        for chunk_path in self.chunks:
+            duration = self._get_audio_duration(chunk_path)
+            chunk_durations.append(duration)
+        
+        # Process each chunk
+        for i, (chunk_path, duration) in enumerate(zip(self.chunks, chunk_durations)):
+            logger.info(f"Processing chunk {i+1}/{self.total_chunks}: {chunk_path}")
+            
+            # Try processing with retries
+            for attempt in range(MAX_RETRIES):
+                try:
+                    result = process_func(chunk_path)
+                    results.append(result)
+                    
+                    # Update progress tracking
+                    self.processed_chunks += 1
+                    self.processed_duration += duration
+                    
+                    logger.info(f"Successfully processed chunk {i+1}, progress: {self.get_progress()}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error processing chunk {i+1} (attempt {attempt+1}/{MAX_RETRIES}): {e}")
+                    if attempt == MAX_RETRIES - 1:
+                        logger.error(f"Failed to process chunk {i+1} after {MAX_RETRIES} attempts")
+                        # Add a placeholder for the failed chunk
+                        results.append({
+                            "text": f"[Failed to transcribe chunk {i+1}]",
+                            "error": str(e),
+                            "chunk_path": chunk_path
+                        })
+                        # Still count this chunk as processed for progress tracking
+                        self.processed_chunks += 1
+                        self.processed_duration += duration
+        
+        return results
     
     def reassemble_transcriptions(
         self, 

@@ -110,7 +110,7 @@ def process_large_file(file_path: str, job_id: str) -> dict:
         if TRANSCRIPTION_MODE == "local":
             result = process_with_local_model(file_path)
         else:
-            result = process_with_openai_api(file_path)
+            result = process_with_openai_api(file_path, job_id)
         
         logger.info(f"Transcription completed successfully for job {job_id}")
         active_jobs[job_id]["status"] = "completed"
@@ -144,7 +144,7 @@ def process_with_local_model(file_path: str) -> dict:
     )
     return result
 
-def process_with_openai_api(file_path: str) -> dict:
+def process_with_openai_api(file_path: str, job_id: str = None) -> dict:
     """Process audio file using OpenAI Whisper API with chunking for large files"""
     if not OPENAI_API_KEY:
         raise Exception("OpenAI API key not provided. Set the OPENAI_API_KEY environment variable.")
@@ -154,7 +154,25 @@ def process_with_openai_api(file_path: str) -> dict:
     
     if file_size_mb > MAX_FILE_SIZE_MB:
         logger.info(f"File size ({file_size_mb:.2f} MB) exceeds limit ({MAX_FILE_SIZE_MB} MB). Using chunking.")
-        return process_large_file_with_chunking(file_path)
+        if job_id:
+            return process_large_file_with_chunking(file_path, job_id)
+        else:
+            # For direct API calls without a job_id, create a temporary one
+            temp_job_id = f"temp_{int(time.time())}_{os.urandom(4).hex()}"
+            active_jobs[temp_job_id] = {
+                "status": "processing",
+                "created_at": time.time(),
+                "filename": os.path.basename(file_path),
+                "terminated": False
+            }
+            try:
+                result = process_large_file_with_chunking(file_path, temp_job_id)
+                del active_jobs[temp_job_id]  # Clean up temporary job
+                return result
+            except Exception as e:
+                if temp_job_id in active_jobs:
+                    del active_jobs[temp_job_id]  # Clean up on error
+                raise
     else:
         logger.info(f"File size ({file_size_mb:.2f} MB) within limit. Processing normally.")
         return process_single_file_with_api(file_path)
@@ -171,12 +189,16 @@ def process_single_file_with_api(file_path: str) -> dict:
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
             }
             
-            # Use the OpenAI API endpoint for audio transcription
+            # Use the OpenAI API endpoint for audio transcription with timestamps
             response = requests.post(
                 "https://api.openai.com/v1/audio/transcriptions",
                 headers=headers,
                 files={"file": audio_file},
-                data={"model": "whisper-1"}
+                data={
+                    "model": "whisper-1",
+                    "response_format": "verbose_json",  # Request detailed response
+                    "timestamp_granularities": ["segment"]  # Request segment timestamps
+                }
             )
             
             # Check for successful response
@@ -188,10 +210,15 @@ def process_single_file_with_api(file_path: str) -> dict:
             # Parse the response
             api_response = response.json()
             
+            # Extract segments with timestamps if available
+            segments = []
+            if "segments" in api_response:
+                segments = api_response["segments"]
+            
             # Convert API response to match local model format
             result = {
                 "text": api_response.get("text", ""),
-                "segments": []  # OpenAI API might not provide segments in the same format
+                "segments": segments
             }
             
             return result
@@ -200,7 +227,7 @@ def process_single_file_with_api(file_path: str) -> dict:
         logger.error(f"Error in OpenAI API transcription: {str(e)}")
         raise
 
-def process_large_file_with_chunking(file_path: str) -> dict:
+def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
     """Process a large audio file by chunking it and processing each chunk"""
     logger.info(f"Processing large file with chunking: {file_path}")
     
@@ -215,6 +242,9 @@ def process_large_file_with_chunking(file_path: str) -> dict:
             output_dir=temp_dir
         )
         
+        # Store chunker in active_jobs for progress tracking
+        active_jobs[job_id]["chunker"] = chunker
+        
         # Create chunks
         chunks = chunker.create_chunks()
         if not chunks:
@@ -224,6 +254,9 @@ def process_large_file_with_chunking(file_path: str) -> dict:
         
         # Process each chunk
         chunk_results = chunker.process_chunks(process_single_file_with_api)
+        
+        # Update job progress after processing
+        active_jobs[job_id]["progress"] = chunker.get_progress()
         
         # Reassemble the transcriptions
         result = chunker.reassemble_transcriptions(chunk_results)
@@ -382,6 +415,12 @@ async def get_job_status(job_id: str):
         "created_at": job_info["created_at"],
         "filename": job_info["filename"]
     }
+    
+    # Add progress information if available
+    if job_info["status"] == "processing" and "chunker" in job_info:
+        response["progress"] = job_info["chunker"].get_progress()
+    elif job_info["status"] == "processing" and "progress" in job_info:
+        response["progress"] = job_info["progress"]
     
     if job_info["status"] == "failed":
         response["message"] = job_info.get("error", "Unknown error occurred")
