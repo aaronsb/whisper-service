@@ -409,13 +409,13 @@ async def terminate_job(job_id: str):
     return JSONResponse(content={"message": f"Job {job_id} terminated successfully"})
 
 @app.get("/status/{job_id}")
-async def get_job_status(job_id: str, include_transcript: bool = True):
+async def get_job_status(job_id: str, include_transcript: bool = False):
     """
     Get the status of a transcription job
     
     Parameters:
     - job_id: The ID of the job to check
-    - include_transcript: Whether to include the full transcript in the response (default: True)
+    - include_transcript: Whether to include the full transcript in the response (default: False)
     """
     if job_id not in active_jobs:
         raise HTTPException(status_code=404, detail="Job not found")
