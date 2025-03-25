@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 import threading
 import queue
 import signal
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 import requests
 
 # Conditionally import whisper and torch for local mode
@@ -63,6 +63,8 @@ transcription_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_TRANSCRIP
 job_queue = queue.Queue()
 active_jobs: Dict[str, dict] = {}  # Store job status information
 job_threads: Dict[str, threading.Thread] = {}  # Store job threads for termination
+status_update_threads: Dict[str, threading.Event] = {}  # Store status update thread stop events
+STATUS_UPDATE_INTERVAL = 1.0  # Status update interval in seconds (1000ms)
 
 @app.on_event("startup")
 async def startup_event():
@@ -83,6 +85,9 @@ async def shutdown_event():
     # Terminate any running jobs
     for job_id in list(job_threads.keys()):
         await terminate_job(job_id)
+    # Stop all status update threads
+    for job_id, stop_event in list(status_update_threads.items()):
+        stop_event.set()
 
 def cleanup_file(file_path: str):
     """Clean up temporary file and force garbage collection"""
@@ -94,6 +99,100 @@ def cleanup_file(file_path: str):
     except Exception as e:
         logger.error(f"Error cleaning up file {file_path}: {str(e)}")
 
+def update_job_status(job_id: str):
+    """Periodically update job status with more frequent progress information"""
+    stop_event = status_update_threads[job_id]
+    job_info = active_jobs[job_id]
+    
+    # Initialize progress tracking if not already present
+    if "detailed_progress" not in job_info:
+        job_info["detailed_progress"] = {
+            "current_position": 0,
+            "total_duration": 0,
+            "current_text": "",
+            "processed_segments": [],
+            "last_update_time": time.time()
+        }
+    
+    while not stop_event.is_set() and job_id in active_jobs and active_jobs[job_id]["status"] == "processing":
+        # Update the progress information
+        current_time = time.time()
+        job_info["detailed_progress"]["last_update_time"] = current_time
+        
+        # If we have chunker progress, use that as a base
+        if "chunker" in job_info:
+            chunker_progress = job_info["chunker"].get_progress()
+            job_info["progress"] = chunker_progress
+            
+            # Add more detailed progress from current chunk if available
+            if "current_chunk_progress" in job_info:
+                chunk_progress = job_info["current_chunk_progress"]
+                # Adjust overall progress based on current chunk progress
+                if chunker_progress["total_chunks"] > 0:
+                    chunk_weight = 1.0 / chunker_progress["total_chunks"]
+                    additional_percentage = chunk_progress.get("percentage", 0) * chunk_weight
+                    # Only add the additional percentage for the current chunk
+                    adjusted_percentage = chunker_progress["percentage"] + additional_percentage
+                    job_info["progress"]["percentage"] = min(100.0, adjusted_percentage)
+        
+        # If we have partial transcription results, include them
+        if "partial_result" in job_info:
+            job_info["detailed_progress"]["current_text"] = job_info["partial_result"].get("text", "")
+            job_info["detailed_progress"]["processed_segments"] = job_info["partial_result"].get("segments", [])
+            
+            # Calculate progress based on segment timestamps if available
+            if (job_info["detailed_progress"]["total_duration"] > 0 and 
+                job_info["partial_result"].get("segments") and 
+                len(job_info["partial_result"]["segments"]) > 0):
+                
+                # Get the latest timestamp from the segments
+                latest_segment = job_info["partial_result"]["segments"][-1]
+                if "end" in latest_segment:
+                    latest_timestamp = latest_segment["end"]
+                    total_duration = job_info["detailed_progress"]["total_duration"]
+                    
+                    # Calculate percentage based on timestamp
+                    timestamp_percentage = (latest_timestamp / total_duration) * 100
+                    
+                    # Update progress with timestamp-based percentage
+                    if "progress" not in job_info:
+                        job_info["progress"] = {"percentage": 0}
+                    
+                    # If we're using chunking, blend the timestamp progress with chunk progress
+                    if "chunker" in job_info:
+                        # For chunked processing, we need to adjust based on current chunk
+                        chunker_progress = job_info["chunker"].get_progress()
+                        if chunker_progress["processed_chunks"] > 0:
+                            # Calculate which portion of the audio we're currently processing
+                            chunk_position = chunker_progress["processed_chunks"] - 1
+                            chunk_count = chunker_progress["total_chunks"]
+                            
+                            # Calculate the start and end percentages for this chunk
+                            chunk_start_pct = (chunk_position / chunk_count) * 100
+                            chunk_end_pct = ((chunk_position + 1) / chunk_count) * 100
+                            
+                            # Scale the timestamp percentage to the current chunk's range
+                            chunk_progress_pct = (timestamp_percentage / 100) * (chunk_end_pct - chunk_start_pct)
+                            adjusted_percentage = chunk_start_pct + chunk_progress_pct
+                            
+                            # Update the progress
+                            job_info["progress"]["percentage"] = min(100.0, adjusted_percentage)
+                    else:
+                        # For single file processing, use timestamp percentage directly
+                        job_info["progress"] = {
+                            "percentage": min(100.0, timestamp_percentage),
+                            "current_timestamp": latest_timestamp,
+                            "total_duration": total_duration
+                        }
+        
+        # Sleep for the update interval
+        time.sleep(STATUS_UPDATE_INTERVAL)
+    
+    # Clean up
+    if job_id in status_update_threads:
+        del status_update_threads[job_id]
+    logger.info(f"Status update thread for job {job_id} stopped")
+
 def process_large_file(file_path: str, job_id: str) -> dict:
     """Process large audio file with memory optimization"""
     try:
@@ -103,14 +202,29 @@ def process_large_file(file_path: str, job_id: str) -> dict:
         logger.info(f"Starting transcription for job {job_id}")
         active_jobs[job_id]["status"] = "processing"
         
+        # Initialize partial result storage
+        active_jobs[job_id]["partial_result"] = {"text": "", "segments": []}
+        
+        # Start status update thread
+        status_update_threads[job_id] = threading.Event()
+        threading.Thread(
+            target=update_job_status,
+            args=(job_id,),
+            daemon=True
+        ).start()
+        
         # Force garbage collection before processing
         gc.collect()
         
         # Process the file based on the transcription mode
         if TRANSCRIPTION_MODE == "local":
-            result = process_with_local_model(file_path)
+            result = process_with_local_model(file_path, job_id)
         else:
             result = process_with_openai_api(file_path, job_id)
+        
+        # Stop the status update thread
+        if job_id in status_update_threads:
+            status_update_threads[job_id].set()
         
         logger.info(f"Transcription completed successfully for job {job_id}")
         active_jobs[job_id]["status"] = "completed"
@@ -129,20 +243,140 @@ def process_large_file(file_path: str, job_id: str) -> dict:
             torch.cuda.empty_cache()
         raise
     finally:
+        # Stop the status update thread if it's still running
+        if job_id in status_update_threads:
+            status_update_threads[job_id].set()
+        
         if job_id in job_threads:
             del job_threads[job_id]
         gc.collect()
 
-def process_with_local_model(file_path: str) -> dict:
-    """Process audio file using local Whisper model"""
-    # Process the file with local model
-    result = model.transcribe(
-        file_path,
-        verbose=True,
-        fp16=False,
-        task='transcribe'
-    )
-    return result
+def process_with_local_model(file_path: str, job_id: str = None) -> dict:
+    """Process audio file using local Whisper model with progress updates"""
+    # If no job_id provided, just process normally
+    if job_id is None:
+        result = model.transcribe(
+            file_path,
+            verbose=True,
+            fp16=False,
+            task='transcribe'
+        )
+        return result
+    
+    # For local model, we'll use a custom approach to track progress
+    # First, get the audio duration to estimate progress
+    import subprocess
+    
+    try:
+        # Get audio duration using ffprobe
+        duration_cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+        
+        duration_result = subprocess.run(
+            duration_cmd,
+            check=True,
+            stdout=subprocess.PIPE,
+            text=True
+        )
+        total_duration = float(duration_result.stdout.strip())
+        logger.info(f"Audio duration for job {job_id}: {total_duration:.2f} seconds")
+        
+        # Update the detailed progress with the total duration
+        if job_id in active_jobs and "detailed_progress" in active_jobs[job_id]:
+            active_jobs[job_id]["detailed_progress"]["total_duration"] = total_duration
+        
+        # Start a thread to simulate progress updates during transcription
+        def simulate_progress():
+            start_time = time.time()
+            
+            # Update progress every 0.5 seconds
+            while job_id in active_jobs and active_jobs[job_id]["status"] == "processing":
+                elapsed_time = time.time() - start_time
+                if elapsed_time > total_duration:
+                    break
+                    
+                # Calculate progress percentage
+                progress_pct = min(95.0, (elapsed_time / total_duration) * 100)
+                
+                # Update current chunk progress
+                active_jobs[job_id]["current_chunk_progress"] = {
+                    "percentage": progress_pct
+                }
+                
+                # Generate a simulated partial transcript based on progress
+                if "partial_result" not in active_jobs[job_id]:
+                    active_jobs[job_id]["partial_result"] = {"text": "", "segments": []}
+                
+                # Add a placeholder text to show progress
+                active_jobs[job_id]["partial_result"]["text"] = f"Transcribing audio... ({progress_pct:.1f}% complete)"
+                
+                # Sleep for a short interval
+                time.sleep(0.5)
+        
+        # Start the progress simulation thread
+        progress_thread = threading.Thread(target=simulate_progress, daemon=True)
+        progress_thread.start()
+        
+        # Process the file
+        logger.info(f"Starting transcription with local model for job {job_id}")
+        
+        # Try to use progress_callback if the model supports it
+        try:
+            # Custom callback to track progress during transcription
+            def progress_callback(detected_language, progress, current_segments):
+                if job_id in active_jobs:
+                    # Update partial result with current progress
+                    current_text = " ".join([seg.get("text", "") for seg in current_segments])
+                    active_jobs[job_id]["partial_result"] = {
+                        "text": current_text,
+                        "segments": current_segments
+                    }
+                    
+                    # Update current chunk progress
+                    active_jobs[job_id]["current_chunk_progress"] = {
+                        "percentage": progress * 100,
+                        "detected_language": detected_language
+                    }
+                    
+                    logger.info(f"Progress update for job {job_id}: {progress*100:.1f}%, text length: {len(current_text)}")
+            
+            # Process with progress tracking
+            result = model.transcribe(
+                file_path,
+                verbose=True,
+                fp16=False,
+                task='transcribe',
+                progress_callback=progress_callback
+            )
+        except TypeError:
+            # If progress_callback is not supported, fall back to regular transcription
+            logger.info(f"Progress callback not supported for job {job_id}, using regular transcription")
+            result = model.transcribe(
+                file_path,
+                verbose=True,
+                fp16=False,
+                task='transcribe'
+            )
+        
+        # Update the partial result with the transcription
+        if job_id in active_jobs:
+            active_jobs[job_id]["partial_result"] = {
+                "text": result["text"],
+                "segments": result.get("segments", [])
+            }
+            
+            # Mark as 100% complete
+            active_jobs[job_id]["current_chunk_progress"] = {"percentage": 100}
+        
+        return result
+    except Exception as e:
+        logger.error(f"Error in local model transcription: {str(e)}")
+        raise
 
 def process_with_openai_api(file_path: str, job_id: str = None) -> dict:
     """Process audio file using OpenAI Whisper API with chunking for large files"""
@@ -175,13 +409,39 @@ def process_with_openai_api(file_path: str, job_id: str = None) -> dict:
                 raise
     else:
         logger.info(f"File size ({file_size_mb:.2f} MB) within limit. Processing normally.")
-        return process_single_file_with_api(file_path)
+        return process_single_file_with_api(file_path, job_id)
 
-def process_single_file_with_api(file_path: str) -> dict:
+def process_single_file_with_api(file_path: str, job_id: str = None) -> dict:
     """Process a single file with the OpenAI Whisper API"""
     logger.info(f"Sending file to OpenAI Whisper API: {file_path}")
     
     try:
+        # Get audio duration for progress tracking
+        if job_id and job_id in active_jobs:
+            try:
+                duration_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    file_path
+                ]
+                
+                duration_result = subprocess.run(
+                    duration_cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True
+                )
+                total_duration = float(duration_result.stdout.strip())
+                logger.info(f"Audio duration for job {job_id}: {total_duration:.2f} seconds")
+                
+                # Update the detailed progress with the total duration
+                if "detailed_progress" in active_jobs[job_id]:
+                    active_jobs[job_id]["detailed_progress"]["total_duration"] = total_duration
+            except Exception as e:
+                logger.warning(f"Could not determine audio duration: {e}")
+        
         # Open the audio file
         with open(file_path, "rb") as audio_file:
             # Call OpenAI's Whisper API
@@ -214,12 +474,44 @@ def process_single_file_with_api(file_path: str) -> dict:
             segments = []
             if "segments" in api_response:
                 segments = api_response["segments"]
+                
+                # Log segment timestamps for debugging
+                if segments:
+                    logger.info(f"Received {len(segments)} segments with timestamps")
+                    if len(segments) > 0:
+                        logger.info(f"First segment: {segments[0]}")
+                        logger.info(f"Last segment: {segments[-1]}")
             
             # Convert API response to match local model format
             result = {
                 "text": api_response.get("text", ""),
                 "segments": segments
             }
+            
+            # Update partial result if job_id is provided
+            if job_id and job_id in active_jobs:
+                active_jobs[job_id]["partial_result"] = result
+                
+                # Calculate progress based on timestamps if available
+                if segments and "detailed_progress" in active_jobs[job_id]:
+                    total_duration = active_jobs[job_id]["detailed_progress"]["total_duration"]
+                    if total_duration > 0 and len(segments) > 0 and "end" in segments[-1]:
+                        latest_timestamp = segments[-1]["end"]
+                        timestamp_percentage = (latest_timestamp / total_duration) * 100
+                        logger.info(f"Progress based on timestamps: {timestamp_percentage:.2f}% ({latest_timestamp:.2f}s / {total_duration:.2f}s)")
+                        
+                        # Update progress with timestamp-based percentage
+                        active_jobs[job_id]["current_chunk_progress"] = {
+                            "percentage": min(100.0, timestamp_percentage),
+                            "current_timestamp": latest_timestamp,
+                            "total_duration": total_duration
+                        }
+                    else:
+                        # Fallback to 100% if we can't calculate based on timestamps
+                        active_jobs[job_id]["current_chunk_progress"] = {"percentage": 100}
+                else:
+                    # Mark this chunk as 100% complete if no segments with timestamps
+                    active_jobs[job_id]["current_chunk_progress"] = {"percentage": 100}
             
             return result
             
@@ -232,8 +524,8 @@ def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
     logger.info(f"Processing large file with chunking: {file_path}")
     
     try:
-        # Create a temporary directory for chunks
-        temp_dir = os.path.join(os.path.dirname(file_path), "temp_chunks")
+        # Create a temporary directory for chunks with job ID to avoid collisions
+        temp_dir = os.path.join(os.path.dirname(file_path), f"temp_chunks_{job_id}")
         os.makedirs(temp_dir, exist_ok=True)
         
         # Initialize the audio chunker
@@ -245,15 +537,181 @@ def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
         # Store chunker in active_jobs for progress tracking
         active_jobs[job_id]["chunker"] = chunker
         
+        # Initialize partial result if not already present
+        if "partial_result" not in active_jobs[job_id]:
+            active_jobs[job_id]["partial_result"] = {"text": "", "segments": []}
+        
+        # Get audio duration using ffprobe for better progress tracking
+        import subprocess
+        try:
+            duration_cmd = [
+                'ffprobe',
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                file_path
+            ]
+            
+            duration_result = subprocess.run(
+                duration_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                text=True
+            )
+            total_duration = float(duration_result.stdout.strip())
+            logger.info(f"Total audio duration for job {job_id}: {total_duration:.2f} seconds")
+            
+            # Update the detailed progress with the total duration
+            if "detailed_progress" in active_jobs[job_id]:
+                active_jobs[job_id]["detailed_progress"]["total_duration"] = total_duration
+        except Exception as e:
+            logger.warning(f"Could not determine audio duration: {e}")
+        
         # Create chunks
+        logger.info(f"Creating chunks for job {job_id}...")
         chunks = chunker.create_chunks()
         if not chunks:
             raise Exception("Failed to create chunks from the audio file")
         
         logger.info(f"Created {len(chunks)} chunks for processing")
         
-        # Process each chunk
-        chunk_results = chunker.process_chunks(process_single_file_with_api)
+        # Define a wrapper function to update progress for each chunk
+        def process_chunk_with_updates(chunk_path: str) -> dict:
+            # Reset current chunk progress
+            active_jobs[job_id]["current_chunk_progress"] = {"percentage": 0}
+            
+            # Get chunk index for logging
+            chunk_index = chunks.index(chunk_path) if chunk_path in chunks else -1
+            chunk_name = os.path.basename(chunk_path)
+            logger.info(f"Processing chunk {chunk_index+1}/{len(chunks)}: {chunk_name}")
+            
+            # Get chunk duration for progress tracking
+            try:
+                duration_cmd = [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    chunk_path
+                ]
+                
+                duration_result = subprocess.run(
+                    duration_cmd,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                    text=True
+                )
+                chunk_duration = float(duration_result.stdout.strip())
+                logger.info(f"Chunk duration: {chunk_duration:.2f} seconds")
+                
+                # Calculate chunk start time based on its position
+                if total_duration > 0 and len(chunks) > 0:
+                    chunk_start_time = (chunk_index / len(chunks)) * total_duration
+                    logger.info(f"Estimated chunk start time: {chunk_start_time:.2f} seconds")
+                    
+                    # Store chunk timing information for progress calculation
+                    active_jobs[job_id]["current_chunk_info"] = {
+                        "index": chunk_index,
+                        "total_chunks": len(chunks),
+                        "duration": chunk_duration,
+                        "start_time": chunk_start_time,
+                        "total_duration": total_duration
+                    }
+            except Exception as e:
+                logger.warning(f"Could not determine chunk duration: {e}")
+            
+            # Start a thread to simulate progress updates during API processing
+            def simulate_chunk_progress():
+                start_time = time.time()
+                
+                # Update progress every 0.5 seconds
+                while job_id in active_jobs and active_jobs[job_id]["status"] == "processing":
+                    # If current_chunk_progress is 100, the chunk is done
+                    if job_id in active_jobs and "current_chunk_progress" in active_jobs[job_id] and active_jobs[job_id]["current_chunk_progress"].get("percentage", 0) >= 100:
+                        break
+                    
+                    # Calculate elapsed time and update progress
+                    elapsed_time = time.time() - start_time
+                    # Assume API processing takes about 5 seconds per chunk
+                    progress_pct = min(95.0, (elapsed_time / 5.0) * 100)
+                    
+                    # Update current chunk progress
+                    if job_id in active_jobs:
+                        active_jobs[job_id]["current_chunk_progress"]["percentage"] = progress_pct
+                        
+                        # Update the detailed progress
+                        if "detailed_progress" in active_jobs[job_id]:
+                            # Calculate overall progress
+                            if "chunker" in active_jobs[job_id]:
+                                chunker_progress = active_jobs[job_id]["chunker"].get_progress()
+                                if chunker_progress["total_chunks"] > 0:
+                                    chunk_weight = 1.0 / chunker_progress["total_chunks"]
+                                    additional_percentage = progress_pct * chunk_weight
+                                    # Add the additional percentage for the current chunk
+                                    adjusted_percentage = chunker_progress["percentage"] + additional_percentage
+                                    active_jobs[job_id]["progress"] = {
+                                        **chunker_progress,
+                                        "percentage": min(100.0, adjusted_percentage)
+                                    }
+                    
+                    # Sleep for a short interval
+                    time.sleep(0.5)
+            
+            # Start the progress simulation thread
+            progress_thread = threading.Thread(target=simulate_chunk_progress, daemon=True)
+            progress_thread.start()
+            
+            # Process the chunk
+            result = process_single_file_with_api(chunk_path, job_id)
+            
+            # Update partial result with accumulated text
+            if job_id in active_jobs and "partial_result" in active_jobs[job_id]:
+                current_text = active_jobs[job_id]["partial_result"].get("text", "")
+                current_segments = active_jobs[job_id]["partial_result"].get("segments", [])
+                
+                # Append new text and segments
+                new_text = (current_text + " " + result["text"]).strip()
+                
+                # Adjust segment timestamps based on chunk position
+                adjusted_segments = []
+                if "current_chunk_info" in active_jobs[job_id] and result.get("segments"):
+                    chunk_info = active_jobs[job_id]["current_chunk_info"]
+                    chunk_start_time = chunk_info.get("start_time", 0)
+                    
+                    for segment in result.get("segments", []):
+                        adjusted_segment = segment.copy()
+                        if "start" in adjusted_segment:
+                            adjusted_segment["start"] += chunk_start_time
+                        if "end" in adjusted_segment:
+                            adjusted_segment["end"] += chunk_start_time
+                        adjusted_segments.append(adjusted_segment)
+                else:
+                    adjusted_segments = result.get("segments", [])
+                
+                # Update the partial result with adjusted segments
+                active_jobs[job_id]["partial_result"]["text"] = new_text
+                active_jobs[job_id]["partial_result"]["segments"] = current_segments + adjusted_segments
+                
+                # Also update the detailed progress
+                if "detailed_progress" in active_jobs[job_id]:
+                    active_jobs[job_id]["detailed_progress"]["current_text"] = new_text
+                    active_jobs[job_id]["detailed_progress"]["processed_segments"] = active_jobs[job_id]["partial_result"]["segments"]
+                
+                logger.info(f"Updated partial result for job {job_id}, current length: {len(new_text)}")
+                
+                # Log the latest segment timestamp for debugging
+                if adjusted_segments:
+                    latest_segment = adjusted_segments[-1]
+                    if "end" in latest_segment:
+                        logger.info(f"Latest segment timestamp: {latest_segment['end']:.2f}s")
+            
+            # Mark this chunk as 100% complete
+            active_jobs[job_id]["current_chunk_progress"] = {"percentage": 100}
+            
+            return result
+        
+        # Process each chunk with progress updates
+        chunk_results = chunker.process_chunks(process_chunk_with_updates)
         
         # Update job progress after processing
         active_jobs[job_id]["progress"] = chunker.get_progress()
@@ -263,6 +721,15 @@ def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
         
         # Clean up temporary files
         chunker.cleanup()
+        
+        # Also clean up the temp directory we created
+        try:
+            # Remove the temp directory if it exists
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"Removed temporary chunk directory: {temp_dir}")
+        except Exception as e:
+            logger.warning(f"Could not remove temporary directory {temp_dir}: {e}")
         
         return result
         
@@ -402,6 +869,10 @@ async def terminate_job(job_id: str):
     active_jobs[job_id]["terminated"] = True
     active_jobs[job_id]["status"] = "terminated"
     
+    # Stop status update thread if it exists
+    if job_id in status_update_threads:
+        status_update_threads[job_id].set()
+    
     # Remove thread reference if it exists
     if job_id in job_threads:
         del job_threads[job_id]
@@ -429,10 +900,22 @@ async def get_job_status(job_id: str, include_transcript: bool = False):
     }
     
     # Add progress information if available
-    if job_info["status"] == "processing" and "chunker" in job_info:
-        response["progress"] = job_info["chunker"].get_progress()
-    elif job_info["status"] == "processing" and "progress" in job_info:
-        response["progress"] = job_info["progress"]
+    if job_info["status"] == "processing":
+        if "progress" in job_info:
+            response["progress"] = job_info["progress"]
+        elif "chunker" in job_info:
+            response["progress"] = job_info["chunker"].get_progress()
+        
+        # Add detailed progress information if available
+        if "detailed_progress" in job_info:
+            response["detailed_progress"] = job_info["detailed_progress"]
+        
+        # Add partial transcription result if available
+        if "partial_result" in job_info and include_transcript:
+            response["partial_result"] = {
+                "text": job_info["partial_result"].get("text", ""),
+                "segments": job_info["partial_result"].get("segments", [])
+            }
     
     if job_info["status"] == "failed":
         response["message"] = job_info.get("error", "Unknown error occurred")
