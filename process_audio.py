@@ -5,6 +5,7 @@ import json
 import argparse
 import requests
 import logging
+import subprocess
 from pathlib import Path
 
 # Import the audio chunker module
@@ -141,30 +142,80 @@ def process_large_file_with_chunking(input_file):
         logger.error(f"Error in chunked processing: {str(e)}")
         raise
 
+def extract_audio_from_mkv(input_file):
+    """Extract audio from MKV file to a temporary WAV file"""
+    logger.info(f"Extracting audio from MKV file: {input_file}")
+    
+    # Create temporary WAV file
+    temp_wav = os.path.join(os.path.dirname(input_file), f"temp_audio_{os.urandom(4).hex()}.wav")
+    
+    try:
+        # Use ffmpeg to extract audio to WAV format
+        cmd = [
+            'ffmpeg',
+            '-i', input_file,
+            '-vn',  # Disable video
+            '-acodec', 'pcm_s16le',  # Convert to PCM WAV
+            '-ar', '16000',  # Set sample rate to 16kHz (Whisper's preferred rate)
+            '-ac', '1',  # Convert to mono
+            '-y',  # Overwrite output file if exists
+            temp_wav
+        ]
+        
+        subprocess.run(cmd, check=True, capture_output=True)
+        logger.info(f"Audio extracted to: {temp_wav}")
+        return temp_wav
+        
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Error extracting audio: {e.stderr.decode()}")
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+        raise Exception(f"Failed to extract audio from MKV: {str(e)}")
+    except Exception as e:
+        logger.error(f"Unexpected error extracting audio: {str(e)}")
+        if os.path.exists(temp_wav):
+            os.remove(temp_wav)
+        raise
+
 def process_audio(input_file):
     """Process audio file using selected transcription method"""
-    # Process based on mode
-    if TRANSCRIPTION_MODE == "local":
-        result = process_audio_local(input_file)
-    else:
-        result = process_audio_api(input_file)
-    
-    # Create output filename
-    input_path = Path(input_file)
-    output_path = Path("/app/output") / f"{input_path.stem}_transcript.json"
-    
-    # Create output directory if it doesn't exist
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    
-    # Save the result
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    
-    logger.info(f"Transcription saved to {output_path}")
-    logger.info("\nTranscription text:")
-    logger.info(result["text"][:200] + "..." if len(result["text"]) > 200 else result["text"])
-    
-    return result
+    temp_wav = None
+    try:
+        # Check if input is MKV and extract audio if needed
+        if input_file.lower().endswith('.mkv'):
+            temp_wav = extract_audio_from_mkv(input_file)
+            input_file = temp_wav
+        
+        # Process based on mode
+        if TRANSCRIPTION_MODE == "local":
+            result = process_audio_local(input_file)
+        else:
+            result = process_audio_api(input_file)
+        
+        # Create output filename
+        input_path = Path(input_file)
+        output_path = Path("/app/output") / f"{input_path.stem}_transcript.json"
+        
+        # Create output directory if it doesn't exist
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        
+        # Save the result
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        
+        logger.info(f"Transcription saved to {output_path}")
+        logger.info("\nTranscription text:")
+        logger.info(result["text"][:200] + "..." if len(result["text"]) > 200 else result["text"])
+        
+        return result
+    finally:
+        # Clean up temporary WAV file if it was created
+        if temp_wav and os.path.exists(temp_wav):
+            try:
+                os.remove(temp_wav)
+                logger.info(f"Cleaned up temporary WAV file: {temp_wav}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary WAV file: {e}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process audio files using Whisper")

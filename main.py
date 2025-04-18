@@ -816,7 +816,7 @@ async def health_check():
     response = {
         "status": "healthy",
         "transcription_mode": TRANSCRIPTION_MODE,
-        "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
+        "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mkv"],
         "active_jobs": len(active_jobs),
         "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
     }
@@ -974,7 +974,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     
     # Validate file extension
     file_extension = Path(file.filename).suffix.lower()
-    valid_extensions = {'.mp3', '.wav', '.m4a', '.ogg', '.flac'}
+    valid_extensions = {'.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mkv'}
     
     if file_extension not in valid_extensions:
         raise HTTPException(
