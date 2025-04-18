@@ -78,10 +78,14 @@ The algorithm follows these rules:
    - Parse the output to extract silence start and end timestamps
 
 2. **Audio Splitting**
-   - Use ffmpeg to split the audio at the determined points:
+   - Use ffmpeg to split the audio at the determined points and convert to optimized MP3:
    ```
-   ffmpeg -i input.mp3 -ss [start_time] -to [end_time] -c copy chunk1.mp3
+   ffmpeg -i input.file -ss [start_time] -to [end_time] -vn -ar 16000 -ac 1 -c:a libmp3lame -q:a 4 chunk1.mp3
    ```
+   - Parameters optimized for speech:
+     * 16kHz sample rate (optimal for speech recognition)
+     * Mono audio (sufficient for voice)
+     * MP3 quality level 4 (good balance of quality and size)
 
 3. **File Size Estimation**
    - Use ffprobe to estimate the size of audio segments:
@@ -117,6 +121,14 @@ The algorithm follows these rules:
 3. **Progress Tracking**
    - Provide detailed progress information for chunked processing jobs
    - Allow users to monitor the status of individual chunks
+
+## Optimizations
+
+1. **Efficient Audio Format**
+   - All audio is converted to MP3 format with optimized settings for speech
+   - Reduces bandwidth usage when sending to OpenAI API
+   - Maintains quality necessary for accurate transcription
+   - Consistent format across all processing stages
 
 ## Future Enhancements
 

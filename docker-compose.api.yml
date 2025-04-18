@@ -8,6 +8,7 @@ services:
       - "9673:9673"
     volumes:
       - ./uploads:/app/uploads
+      - whisper-temp:/app/temp
     user: "${UID}:${GID}"
     environment:
       - TRANSCRIPTION_MODE=api
@@ -22,3 +23,6 @@ services:
       --log-level info
       --reload
       --reload-dir /app
+
+volumes:
+  whisper-temp:  # Docker-managed volume for temporary files

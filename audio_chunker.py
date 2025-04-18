@@ -235,9 +235,6 @@ def split_audio(
     else:
         os.makedirs(output_dir, exist_ok=True)
     
-    # Get file extension
-    file_extension = os.path.splitext(file_path)[1]
-    
     # Prepare split points including start and end
     all_points = [0] + split_points
     
@@ -266,19 +263,23 @@ def split_audio(
             start_time = all_points[i]
             end_time = all_points[i + 1]
             
-            # Generate output filename
+            # Generate output filename with .mp3 extension
             output_path = os.path.join(
                 output_dir, 
-                f"chunk_{i:03d}{file_extension}"
+                f"chunk_{i:03d}.mp3"
             )
             
-            # Construct ffmpeg command
+            # Construct ffmpeg command with MP3 conversion
             cmd = [
                 'ffmpeg',
                 '-i', file_path,
                 '-ss', str(start_time),
                 '-to', str(end_time),
-                '-c', 'copy',  # Use copy codec for faster processing
+                '-vn',  # Disable video
+                '-ar', '16000',  # Set sample rate to 16kHz
+                '-ac', '1',  # Convert to mono
+                '-c:a', 'libmp3lame',  # Use MP3 codec
+                '-q:a', '4',  # Good quality for speech (0-9, lower is better)
                 '-y',  # Overwrite output files
                 output_path
             ]

@@ -10,7 +10,8 @@ A Docker-powered service that transcribes audio files using OpenAI's Whisper mod
 - 🚀 Easy setup with Docker
 - 🔄 Flexible configuration with local or API-based transcription
 - 📦 No file size limits with optimized memory handling
-- 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .ogg, .flac)
+- 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .ogg, .flac, .mkv)
+- 🔊 Optimized MP3 conversion for efficient API usage
 - ⚡ GPU acceleration with CUDA 12.1 support (local mode)
 - 🔄 Concurrent processing with job management
 - 🔍 Real-time job status tracking
@@ -207,6 +208,16 @@ You can switch between modes using the `configure.sh` script, which will:
 - Guide you through API key setup if needed
 
 ### Performance Optimization
+
+#### Audio Format Optimization
+
+The service automatically optimizes audio for transcription:
+- Converts all audio to MP3 format with settings optimized for speech:
+  * 16kHz sample rate (optimal for speech recognition)
+  * Mono audio (sufficient for voice)
+  * MP3 quality level 4 (good balance of quality and size)
+- Reduces bandwidth usage when sending to OpenAI API
+- Maintains consistent quality across all processing stages
 
 #### Local Mode Optimizations
 

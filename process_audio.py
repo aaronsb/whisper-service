@@ -59,9 +59,28 @@ def process_audio_api(input_file):
 
 def process_single_file_with_api(input_file):
     """Process a single file with the OpenAI Whisper API"""
+    temp_mp3 = None
     try:
-        # Open the audio file
-        with open(input_file, "rb") as audio_file:
+        # Convert to MP3 format with correct parameters
+        temp_mp3 = os.path.join(os.path.dirname(input_file), f"temp_api_{os.urandom(4).hex()}.mp3")
+        
+        # Convert to MP3 with correct parameters
+        cmd = [
+            'ffmpeg',
+            '-i', input_file,
+            '-vn',  # Disable video
+            '-ar', '16000',  # Set sample rate to 16kHz
+            '-ac', '1',  # Convert to mono
+            '-c:a', 'libmp3lame',  # Use MP3 codec
+            '-q:a', '4',  # Good quality for speech (0-9, lower is better)
+            '-y',  # Overwrite output files
+            temp_mp3
+        ]
+        subprocess.run(cmd, check=True, capture_output=True)
+        logger.info(f"Converted to MP3 format: {temp_mp3}")
+
+        # Open the MP3 file
+        with open(temp_mp3, "rb") as audio_file:
             # Call OpenAI's Whisper API
             headers = {
                 "Authorization": f"Bearer {OPENAI_API_KEY}"
@@ -78,28 +97,28 @@ def process_single_file_with_api(input_file):
                     "timestamp_granularities": ["segment"]  # Request segment timestamps
                 }
             )
-            
-            # Check for successful response
-            if response.status_code != 200:
-                error_message = f"API request failed with status {response.status_code}: {response.text}"
-                logger.error(error_message)
-                raise Exception(error_message)
-            
-            # Parse the response
-            api_response = response.json()
-            
-            # Extract segments with timestamps if available
-            segments = []
-            if "segments" in api_response:
-                segments = api_response["segments"]
-            
-            # Convert API response to match local model format
-            result = {
-                "text": api_response.get("text", ""),
-                "segments": segments
-            }
-            
-            return result
+        
+        # Check for successful response
+        if response.status_code != 200:
+            error_message = f"API request failed with status {response.status_code}: {response.text}"
+            logger.error(error_message)
+            raise Exception(error_message)
+        
+        # Parse the response
+        api_response = response.json()
+        
+        # Extract segments with timestamps if available
+        segments = []
+        if "segments" in api_response:
+            segments = api_response["segments"]
+        
+        # Convert API response to match local model format
+        result = {
+            "text": api_response.get("text", ""),
+            "segments": segments
+        }
+        
+        return result
             
     except Exception as e:
         logger.error(f"Error in OpenAI API transcription: {str(e)}")
@@ -179,13 +198,7 @@ def extract_audio_from_mkv(input_file):
 
 def process_audio(input_file):
     """Process audio file using selected transcription method"""
-    temp_wav = None
     try:
-        # Check if input is MKV and extract audio if needed
-        if input_file.lower().endswith('.mkv'):
-            temp_wav = extract_audio_from_mkv(input_file)
-            input_file = temp_wav
-        
         # Process based on mode
         if TRANSCRIPTION_MODE == "local":
             result = process_audio_local(input_file)
@@ -209,13 +222,8 @@ def process_audio(input_file):
         
         return result
     finally:
-        # Clean up temporary WAV file if it was created
-        if temp_wav and os.path.exists(temp_wav):
-            try:
-                os.remove(temp_wav)
-                logger.info(f"Cleaned up temporary WAV file: {temp_wav}")
-            except Exception as e:
-                logger.warning(f"Failed to clean up temporary WAV file: {e}")
+        # No cleanup needed as we're not creating temporary files
+        pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process audio files using Whisper")
