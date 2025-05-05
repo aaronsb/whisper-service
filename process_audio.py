@@ -161,9 +161,9 @@ def process_large_file_with_chunking(input_file):
         logger.error(f"Error in chunked processing: {str(e)}")
         raise
 
-def extract_audio_from_mkv(input_file):
-    """Extract audio from MKV file to a temporary WAV file"""
-    logger.info(f"Extracting audio from MKV file: {input_file}")
+def extract_audio_from_video(input_file, format_name="video"):
+    """Extract audio from a video file (MP4, MKV, etc.) to a temporary WAV file"""
+    logger.info(f"Extracting audio from {format_name} file: {input_file}")
     
     # Create temporary WAV file
     temp_wav = os.path.join(os.path.dirname(input_file), f"temp_audio_{os.urandom(4).hex()}.wav")
@@ -189,16 +189,36 @@ def extract_audio_from_mkv(input_file):
         logger.error(f"Error extracting audio: {e.stderr.decode()}")
         if os.path.exists(temp_wav):
             os.remove(temp_wav)
-        raise Exception(f"Failed to extract audio from MKV: {str(e)}")
+        raise Exception(f"Failed to extract audio from {format_name}: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected error extracting audio: {str(e)}")
         if os.path.exists(temp_wav):
             os.remove(temp_wav)
         raise
 
+def extract_audio_from_mkv(input_file):
+    """Extract audio from MKV file to a temporary WAV file"""
+    return extract_audio_from_video(input_file, format_name="MKV")
+    
+def extract_audio_from_mp4(input_file):
+    """Extract audio from MP4 file to a temporary WAV file"""
+    return extract_audio_from_video(input_file, format_name="MP4")
+
 def process_audio(input_file):
     """Process audio file using selected transcription method"""
+    temp_file = None
     try:
+        # Check if input is a video file that needs audio extraction
+        file_extension = Path(input_file).suffix.lower()
+        
+        # Extract audio from video files using the appropriate method
+        if file_extension == '.mkv':
+            temp_file = extract_audio_from_mkv(input_file)
+            input_file = temp_file
+        elif file_extension == '.mp4':
+            temp_file = extract_audio_from_mp4(input_file)
+            input_file = temp_file
+        
         # Process based on mode
         if TRANSCRIPTION_MODE == "local":
             result = process_audio_local(input_file)
@@ -222,8 +242,14 @@ def process_audio(input_file):
         
         return result
     finally:
-        # No cleanup needed as we're not creating temporary files
-        pass
+        # Clean up temporary file if created
+        if temp_file and os.path.exists(temp_file):
+            try:
+                os.remove(temp_file)
+                logger.info(f"Cleaned up temporary file: {temp_file}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary file: {e}")
+                pass
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process audio files using Whisper")

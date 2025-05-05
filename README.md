@@ -10,7 +10,7 @@ A Docker-powered service that transcribes audio files using OpenAI's Whisper mod
 - 🚀 Easy setup with Docker
 - 🔄 Flexible configuration with local or API-based transcription
 - 📦 No file size limits with optimized memory handling
-- 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .ogg, .flac, .mkv)
+- 🎯 Supports multiple audio formats (.mp3, .wav, .m4a, .mp4, .ogg, .flac, .mkv)
 - 🔊 Optimized MP3 conversion for efficient API usage
 - ⚡ GPU acceleration with CUDA 12.1 support (local mode)
 - 🔄 Concurrent processing with job management
@@ -289,7 +289,7 @@ In local mode, the service automatically detects and uses your NVIDIA GPU if ava
 {
     "status": "healthy",
     "model": "whisper-base",
-    "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac"],
+    "supported_formats": [".mp3", ".wav", ".m4a", ".mp4", ".ogg", ".flac", ".mkv"],
     "max_file_size": "unlimited",
     "gpu_available": true,
     "active_jobs": 1,

@@ -414,8 +414,32 @@ def process_with_openai_api(file_path: str, job_id: str = None) -> dict:
 def process_single_file_with_api(file_path: str, job_id: str = None) -> dict:
     """Process a single file with the OpenAI Whisper API"""
     logger.info(f"Sending file to OpenAI Whisper API: {file_path}")
+    temp_mp3 = None
     
     try:
+        # Convert to MP3 format with correct parameters for optimal API processing
+        file_extension = Path(file_path).suffix.lower()
+        if file_extension in ['.mp4', '.mkv', '.wav', '.m4a', '.ogg', '.flac']:
+            temp_mp3 = os.path.join(os.path.dirname(file_path), f"temp_api_{os.urandom(4).hex()}.mp3")
+            
+            # Convert to MP3 with correct parameters
+            cmd = [
+                'ffmpeg',
+                '-i', file_path,
+                '-vn',  # Disable video
+                '-ar', '16000',  # Set sample rate to 16kHz
+                '-ac', '1',  # Convert to mono
+                '-c:a', 'libmp3lame',  # Use MP3 codec
+                '-q:a', '4',  # Good quality for speech (0-9, lower is better)
+                '-y',  # Overwrite output files
+                temp_mp3
+            ]
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            logger.info(f"Converted to MP3 format: {temp_mp3}")
+            
+            # Use the MP3 file for processing
+            file_path = temp_mp3
+        
         # Get audio duration for progress tracking
         if job_id and job_id in active_jobs:
             try:
@@ -518,6 +542,14 @@ def process_single_file_with_api(file_path: str, job_id: str = None) -> dict:
     except Exception as e:
         logger.error(f"Error in OpenAI API transcription: {str(e)}")
         raise
+    finally:
+        # Clean up temporary MP3 file if created
+        if temp_mp3 and os.path.exists(temp_mp3):
+            try:
+                os.remove(temp_mp3)
+                logger.info(f"Cleaned up temporary MP3 file: {temp_mp3}")
+            except Exception as e:
+                logger.warning(f"Failed to clean up temporary MP3 file: {e}")
 
 def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
     """Process a large audio file by chunking it and processing each chunk"""
@@ -816,7 +848,7 @@ async def health_check():
     response = {
         "status": "healthy",
         "transcription_mode": TRANSCRIPTION_MODE,
-        "supported_formats": [".mp3", ".wav", ".m4a", ".ogg", ".flac", ".mkv"],
+        "supported_formats": [".mp3", ".wav", ".m4a", ".mp4", ".ogg", ".flac", ".mkv"],
         "active_jobs": len(active_jobs),
         "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
     }
@@ -974,7 +1006,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     
     # Validate file extension
     file_extension = Path(file.filename).suffix.lower()
-    valid_extensions = {'.mp3', '.wav', '.m4a', '.ogg', '.flac', '.mkv'}
+    valid_extensions = {'.mp3', '.wav', '.m4a', '.mp4', '.ogg', '.flac', '.mkv'}
     
     if file_extension not in valid_extensions:
         raise HTTPException(
