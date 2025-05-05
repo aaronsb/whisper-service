@@ -18,6 +18,7 @@ import queue
 import signal
 from typing import Dict, Optional, List
 import requests
+import subprocess
 
 # Conditionally import whisper and torch for local mode
 TRANSCRIPTION_MODE = os.environ.get("TRANSCRIPTION_MODE", "local").lower()
@@ -265,8 +266,6 @@ def process_with_local_model(file_path: str, job_id: str = None) -> dict:
     
     # For local model, we'll use a custom approach to track progress
     # First, get the audio duration to estimate progress
-    import subprocess
-    
     try:
         # Get audio duration using ffprobe
         duration_cmd = [
@@ -574,7 +573,6 @@ def process_large_file_with_chunking(file_path: str, job_id: str) -> dict:
             active_jobs[job_id]["partial_result"] = {"text": "", "segments": []}
         
         # Get audio duration using ffprobe for better progress tracking
-        import subprocess
         try:
             duration_cmd = [
                 'ffprobe',
