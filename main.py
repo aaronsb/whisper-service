@@ -418,7 +418,7 @@ def process_single_file_with_api(file_path: str, job_id: str = None) -> dict:
     try:
         # Convert to MP3 format with correct parameters for optimal API processing
         file_extension = Path(file_path).suffix.lower()
-        if file_extension in ['.mp4', '.mkv', '.wav', '.m4a', '.ogg', '.flac']:
+        if file_extension in ['.mp4', '.mkv', '.wav', '.m4a', '.ogg', '.flac', '.mov']:
             temp_mp3 = os.path.join(os.path.dirname(file_path), f"temp_api_{os.urandom(4).hex()}.mp3")
             
             # Convert to MP3 with correct parameters
@@ -846,7 +846,7 @@ async def health_check():
     response = {
         "status": "healthy",
         "transcription_mode": TRANSCRIPTION_MODE,
-        "supported_formats": [".mp3", ".wav", ".m4a", ".mp4", ".ogg", ".flac", ".mkv"],
+        "supported_formats": [".mp3", ".wav", ".m4a", ".mp4", ".ogg", ".flac", ".mkv", ".mov"],
         "active_jobs": len(active_jobs),
         "max_concurrent_jobs": MAX_CONCURRENT_TRANSCRIPTIONS
     }
@@ -1004,7 +1004,7 @@ async def transcribe_audio(file: UploadFile = File(...)):
     
     # Validate file extension
     file_extension = Path(file.filename).suffix.lower()
-    valid_extensions = {'.mp3', '.wav', '.m4a', '.mp4', '.ogg', '.flac', '.mkv'}
+    valid_extensions = {'.mp3', '.wav', '.m4a', '.mp4', '.ogg', '.flac', '.mkv', '.mov'}
     
     if file_extension not in valid_extensions:
         raise HTTPException(

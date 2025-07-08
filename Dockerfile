@@ -18,7 +18,7 @@ RUN pip3 install openai-whisper fastapi "uvicorn[standard]" python-multipart
 RUN mkdir -p /app/uploads /app/temp && chmod 777 /app/uploads /app/temp
 
 # Copy the API service code
-COPY main.py .
+COPY main.py audio_chunker.py ./
 
 # Set environment variables for better performance
 ENV PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
